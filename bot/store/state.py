@@ -192,6 +192,12 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         # msg_id, labels, offered_at, repo}}. Its own key, not on Instance,
         # because instances are pruned and an offer must outlive a restart.
         self._choice_offers: dict[str, dict] = {}
+        # The end card's open items, one record per channel (bot/engine/recap.py
+        # owns the rules): {channel_id: {msg_id, posted_at, repo, headline,
+        # open_items, instance_id}}. Its own key for the same reason as the
+        # offers above: it decides whether the thread may close, so it must
+        # outlive a restart and an instance prune.
+        self._recaps: dict[str, dict] = {}
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -316,6 +322,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._peer_cursors = data.get("peer_cursors", {})
         self._peer_daily = data.get("peer_daily", {})
         self._choice_offers = data.get("choice_offers", {}) or {}
+        self._recaps = data.get("recaps", {}) or {}
         self._deploy_state = {
             k: DeployState.from_dict(v)
             for k, v in data.get("deploy_state", {}).items()
@@ -413,6 +420,25 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
     def list_choice_offers(self) -> dict[str, dict]:
         return dict(self._choice_offers)
 
+    # --- end card records (bot/engine/recap.py owns the rules) ---
+
+    def get_recap(self, channel_id: str) -> dict | None:
+        return self._recaps.get(str(channel_id))
+
+    def put_recap(self, channel_id: str, record: dict) -> None:
+        """A newer card supersedes the older one: one record per channel."""
+        self._recaps[str(channel_id)] = record
+        self.save()
+
+    def pop_recap(self, channel_id: str) -> dict | None:
+        record = self._recaps.pop(str(channel_id), None)
+        if record is not None:
+            self.save()
+        return record
+
+    def list_recaps(self) -> dict[str, dict]:
+        return dict(self._recaps)
+
     def mark_dirty(self) -> None:
         """Mark state as changed — actual write deferred to auto-save loop."""
         self._dirty = True
@@ -460,6 +486,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
             "peer_cursors": self._peer_cursors,
             "peer_daily": self._peer_daily,
             "choice_offers": self._choice_offers,
+            "recaps": self._recaps,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},

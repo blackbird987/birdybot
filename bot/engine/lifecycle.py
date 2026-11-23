@@ -311,6 +311,7 @@ _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
     InstanceOrigin.PLAN_CHECK_APPLY,
     InstanceOrigin.PEER_ANSWER,
     InstanceOrigin.PEER_DELIVERY,
+    InstanceOrigin.RECAP,
 })
 
 # A judge or plan check run is a check on a thread's work and not a turn in it
@@ -333,6 +334,7 @@ _KEEPS_CHOICE_OFFER_ORIGINS = _NOT_A_TURN_ORIGINS | {InstanceOrigin.TLDR}
 # for the same reason.
 _CALLER_READS_ORIGINS = _NOT_A_TURN_ORIGINS | {
     InstanceOrigin.PLAN_CHECK_APPLY, InstanceOrigin.PEER_DELIVERY,
+    InstanceOrigin.RECAP,
 }
 
 
@@ -923,6 +925,7 @@ _SKIP_HISTORY_ORIGINS = frozenset({
     InstanceOrigin.PLAN_CHECK_APPLY,
     InstanceOrigin.PEER_ANSWER,
     InstanceOrigin.PEER_DELIVERY,
+    InstanceOrigin.RECAP,
 })
 
 

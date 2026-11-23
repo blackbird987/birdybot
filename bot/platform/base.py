@@ -39,6 +39,31 @@ class MessageHandle:
 
 
 @dataclass
+class CardSpec:
+    """A platform-neutral summary card. The end card (bot/engine/recap.py)
+    is the one user: a title, short named fields, a footer and one optional
+    picture, all inside Discord's embed limits by construction."""
+    title: str
+    description: str = ""
+    fields: list[tuple[str, str]] = field(default_factory=list)
+    color: str = "green"  # green | gold | blurple | red
+    footer: str = ""
+    image_path: str | None = None
+
+    def as_text(self) -> str:
+        """The card as plain markdown, for a messenger with no cards."""
+        parts = [f"**{self.title}**"] if self.title else []
+        if self.description:
+            parts.append(self.description)
+        for name, value in self.fields:
+            if value:
+                parts.append(f"**{name}**\n{value}")
+        if self.footer:
+            parts.append(self.footer)
+        return "\n\n".join(parts)
+
+
+@dataclass
 class SpawnArgs:
     """Inputs for ctx.spawn_session — the [BOT_CMD: /spawn] dispatch contract.
 
@@ -111,6 +136,20 @@ class Messenger(Protocol):
         mention_user_id: str | None = None,
     ) -> str:
         """Send a result message. Returns message_id as string."""
+        ...
+
+    async def send_card(
+        self, channel_id: str, card: CardSpec,
+        buttons: list[list[ButtonSpec]] | None = None,
+        silent: bool = False,
+        mention_user_id: str | None = None,
+    ) -> str:
+        """Send a summary card, with its picture attached when it has one.
+
+        A picture the platform refuses costs the picture, never the card.
+        Callers fall back to ``send_result(card.as_text())`` when a
+        messenger has no cards. Returns message_id as string.
+        """
         ...
 
     async def edit_text(

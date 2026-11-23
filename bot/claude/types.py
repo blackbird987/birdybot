@@ -53,6 +53,7 @@ class InstanceOrigin(str, Enum):
     PLAN_CHECK_APPLY = "plan_check_apply"  # Chain step: the author deciding on what the plan check raised
     PEER_ANSWER = "peer_answer"  # Machine link: read-only run on an export, answering the other machine
     PEER_DELIVERY = "peer_delivery"  # Machine link: a no-tools turn telling a thread what came back
+    RECAP = "recap"             # End of a chain or Done: read-only turn writing the end card's words
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)

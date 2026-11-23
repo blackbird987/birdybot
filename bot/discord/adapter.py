@@ -10,7 +10,7 @@ import discord
 
 from bot.discord import formatter as discord_fmt
 from bot.discord.formatter import apply_discord_safety
-from bot.platform.base import ButtonSpec, MessageHandle
+from bot.platform.base import ButtonSpec, CardSpec, MessageHandle
 from bot.platform.formatting import FinalizeInfo
 from bot.platform.redact import redact_secrets
 
@@ -96,6 +96,16 @@ def view_without_rows(message: discord.Message, prefix: str):
         if item.row in rows:
             view.remove_item(item)
     return view if view.children else None
+
+
+_CARD_COLORS = {
+    "green": discord.Color.green,
+    "gold": discord.Color.gold,
+    "blurple": discord.Color.blurple,
+    "red": discord.Color.red,
+}
+# Discord's attachment ceiling for a bot without boosts.
+_CARD_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 
 class DiscordMessenger:
@@ -284,6 +294,62 @@ class DiscordMessenger:
             content=mention_content, embed=embed, view=view,
             silent=effective_silent,
         )
+        return str(msg.id)
+
+    async def send_card(
+        self, channel_id: str, card: CardSpec,
+        buttons: list[list[ButtonSpec]] | None = None,
+        silent: bool = False,
+        mention_user_id: str | None = None,
+    ) -> str:
+        """Send the end card as one embed, its picture attached inside it.
+
+        A picture Discord refuses (too big, unreadable) is dropped and the
+        card is sent again without it: no picture never means no card.
+        """
+        channel = await self._resolve_channel(channel_id)
+        if not channel:
+            return ""
+        color = _CARD_COLORS.get(card.color, discord.Color.green)()
+        embed = discord.Embed(
+            title=(card.title or "")[:256] or None,
+            description=apply_discord_safety(card.description) if card.description else None,
+            color=color,
+        )
+        for name, value in card.fields[:25]:
+            if value:
+                embed.add_field(name=name[:256], value=value[:1024], inline=False)
+        if card.footer:
+            embed.set_footer(text=card.footer[:2048])
+        file = None
+        if card.image_path:
+            try:
+                path = Path(card.image_path)
+                if path.is_file() and path.stat().st_size <= _CARD_IMAGE_MAX_BYTES:
+                    name = "recap" + path.suffix.lower()
+                    file = discord.File(str(path), filename=name)
+                    embed.set_image(url=f"attachment://{name}")
+            except Exception:
+                log.debug("End card picture unusable: %s", card.image_path, exc_info=True)
+                file = None
+        view = _buttons_to_view(self._shown(channel_id, buttons))
+        mention_content = self.format_mention(mention_user_id) if mention_user_id else None
+        kwargs = {
+            "content": mention_content, "embed": embed, "view": view,
+            "silent": False if mention_content else silent,
+        }
+        if file is not None:
+            kwargs["file"] = file
+        try:
+            msg = await channel.send(**kwargs)
+        except discord.HTTPException:
+            if file is None:
+                raise
+            log.warning("End card picture refused, sending the card without it",
+                        exc_info=True)
+            kwargs.pop("file", None)
+            embed.set_image(url=None)
+            msg = await channel.send(**kwargs)
         return str(msg.id)
 
     @staticmethod

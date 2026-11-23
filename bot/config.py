@@ -2507,6 +2507,16 @@ TRIAGE_DEFERRED_PROMPT = (
     '```'
 )
 
+# Shared by the TL;DR and the end-of-session recap (RECAP_PROMPT): both are
+# read on a phone by someone who does not have the code open.
+PLAIN_LANGUAGE_RULES = (
+    '- No file paths, no function names, no variable names, no class names, '
+    'no command names. If a bullet cannot be written without one, the bullet '
+    'is wrong: rewrite it around what the thing does.\n'
+    '- Never describe your own actions ("I edited...", "I added a check '
+    'to..."). Describe what the system does differently.\n'
+)
+
 # The [TL;DR] button and /tldr. Re-explains whatever is currently on the
 # table, in the one shape that is actually readable on a phone.
 #
@@ -2544,11 +2554,7 @@ TLDR_PROMPT = (
     'named as the default, so "yes" is a complete answer.\n\n'
 
     'Rules, all of them hard:\n'
-    '- No file paths, no function names, no variable names, no class names, '
-    'no command names. If a bullet cannot be written without one, the bullet '
-    'is wrong: rewrite it around what the thing does.\n'
-    '- Never describe your own actions ("I edited...", "I added a check '
-    'to..."). Describe what the system does differently.\n'
+    + PLAIN_LANGUAGE_RULES +
     '- The Example line does the real work. "The bot will not ship a build '
     'missing the last release" is abstract and useless. "You tap Merge on '
     'two parallel builds and the second one no longer silently reverts the '
@@ -2561,6 +2567,67 @@ TLDR_PROMPT = (
     '- If nothing substantive is on the table yet, say that in one line and '
     'stop.\n'
     '- Do not ask whether to continue. End after the last section.'
+)
+
+# The end card's words (docs/design/session-recap.md). A read-only turn that
+# resumes the finished session once, at the end of a chain or a Done, and
+# answers with one ```recap block the bot parses (bot/engine/recap.py). The
+# bot owns every fact it can read itself (version, merge, diff size, checks
+# that could not run) and passes them in at <<FACTS>>, so the turn writes only
+# what needs the conversation: what was asked, before, now, and what is open.
+#
+# Open is strict on purpose: every FOR_YOU or NEXT item keeps the thread
+# open and lists it under Needs you, so a padded list costs the user a close
+# they have to do by hand.
+RECAP_SLOT = "<<FACTS>>"
+RECAP_PROMPT = (
+    'This work is finished for now. Write the end card the user will read '
+    'when they come back to this thread, possibly hours later and after '
+    'working on several other things. They are on a phone and do NOT have '
+    'the code open. In one look the card must tell them what this thread '
+    'was about and where it stands.\n\n'
+
+    'Reply with exactly one block fenced as ```recap holding these keys, '
+    'one per line, in this order:\n\n'
+    '```recap\n'
+    'HEADLINE: what this thread did or found, at most 60 characters\n'
+    'ASKED: what the user asked for, one sentence, in their terms\n'
+    'BEFORE:\n'
+    '- up to 3 bullets: how things stood when they asked\n'
+    'NOW:\n'
+    '- up to 3 bullets: what is true now\n'
+    'FOR_YOU:\n'
+    '- what only the user can do (a decision, a login, a check on a real '
+    'device), or none\n'
+    'NEXT:\n'
+    '- short label | one sentence a fresh turn could act on, or none\n'
+    'IMAGE: path of an existing picture that shows the result, or none\n'
+    '```\n\n'
+
+    'Rules, all of them hard:\n'
+    + PLAIN_LANGUAGE_RULES +
+    '- ASKED is the request behind the work, never the approval. "go", '
+    '"ship it" and "sgo" are not requests: name what they approved.\n'
+    '- The work need not be a fix. Research: BEFORE is the open question '
+    'and NOW is the answer. A build: BEFORE is what was missing. A '
+    'decision: NOW is what was decided. Use the reading that fits.\n'
+    '- FOR_YOU and NEXT hold only what is genuinely open: an unfinished '
+    'part of what was asked, a check that failed or could not run, a '
+    'decision that blocks something. No ideas, no nice-to-haves, no '
+    '"consider also". If nothing is open, write none. Every open item '
+    'keeps this thread open, so padding the list costs the user.\n'
+    '- NEXT is only work this session could pick up by itself. The label '
+    'is at most 30 characters, then a pipe, then one sentence complete '
+    'enough to act on without this card.\n'
+    '- IMAGE only when a picture made during the work already shows the '
+    'result (a screenshot, a chart). Never make one now. Otherwise none.\n'
+    '- The bot already shows the facts below. Do not repeat them.\n'
+    '- The whole block stays under 900 characters. Nothing before or after '
+    'it.\n'
+    '- Do NOT do new work, do not read files, do not run anything, do not '
+    'change anything.\n\n'
+    'Facts the bot already shows:\n'
+    + RECAP_SLOT
 )
 
 CODE_REVIEW_PROMPT = (

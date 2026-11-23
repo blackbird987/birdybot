@@ -36,10 +36,11 @@ from bot.engine.workflows import resolve_spawn_model
 # floor, so it writes no code by construction and is words by definition.
 # PLAN_CHECK_APPLY resumes the session that wrote the plan and rewrites it, so it
 # keeps that session's thinking model and stays behind the same floor.
+# RECAP writes the end card's words from a finished conversation, read-only.
 _THINKING_ORIGINS = frozenset(
     {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.TLDR, InstanceOrigin.STEPBACK,
      InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY,
-     InstanceOrigin.PLAN_CHECK_APPLY}
+     InstanceOrigin.PLAN_CHECK_APPLY, InstanceOrigin.RECAP}
     | set(PLAN_ORIGINS)
 )
 

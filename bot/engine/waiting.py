@@ -96,7 +96,7 @@ _RANK = {k.name: i for i, k in enumerate(KINDS)}
 _NOT_A_TURN = frozenset({
     InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK, InstanceOrigin.TLDR,
     InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.PEER_ANSWER,
-    InstanceOrigin.PEER_DELIVERY, InstanceOrigin.STEPBACK,
+    InstanceOrigin.PEER_DELIVERY, InstanceOrigin.STEPBACK, InstanceOrigin.RECAP,
 })
 # A failed plan-check decision pauses its chain, which is the item that shows.
 _FAILURE_NOT_SHOWN = _NOT_A_TURN | {InstanceOrigin.PLAN_CHECK_APPLY}
