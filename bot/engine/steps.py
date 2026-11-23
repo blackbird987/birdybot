@@ -652,14 +652,20 @@ async def on_done(
         status_text="Wrapping up...", resume_session=True,
         copy_branch=True, silent=True,
     )
+    from bot.engine import recap
     if prompt_variant == "standalone":
         source = ctx.store.get_instance(source_id)
         repo_path_for_lock = source.repo_path if source else None
-        if repo_path_for_lock:
-            async with ctx.runner.release_lock_scope(repo_path_for_lock, "done-standalone"):
+        # This Done ends in the end card posted below, so its own result
+        # card is left out (lifecycle._end_card_follows).
+        with recap.card_follows():
+            if repo_path_for_lock:
+                async with ctx.runner.release_lock_scope(repo_path_for_lock,
+                                                         "done-standalone"):
+                    result = await spawn_from(ctx, source_id, cfg,
+                                              source_msg_id=source_msg_id)
+            else:
                 result = await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
-        else:
-            result = await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
     else:
         result = await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
 
@@ -678,16 +684,15 @@ async def on_done(
 
     # Standalone Done ends in the end card (bot/engine/recap.py). Its words
     # are gathered now, while the worktree the session runs in still exists.
-    from bot.engine import recap
     draft = await recap.prepare(ctx, result)
 
     # A build branch gets the same merge + tag sequence the autopilot chain
     # runs. On failure the Merge/Discard buttons remain so the user can
-    # resolve by hand.
+    # resolve by hand. The card decides the close and the ping.
     if result.branch and result.original_branch:
         report: list[str] = []
         outcome = await _finalize_merge(
-            ctx, result, close_silent=True, skip_close=True, report=report,
+            ctx, result, skip_close=True, report=report,
         )
         if outcome is MergeOutcome.FAILED:
             await recap.post(ctx, draft, recap.EndState(kind="merge_failed"),

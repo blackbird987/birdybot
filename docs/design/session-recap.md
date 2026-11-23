@@ -21,7 +21,8 @@ Now the end is one card:
     Notes       • 2 review leftovers filed in TODO.md
     bot · 1h 12m · Opus · abc1234                          (footer)
     [Add the expiry test] [Clean old sessions] [Do all]
-    [Close] [Missed]
+    [Close]
+    [Missed]
 
 The shape is the same for every kind of work (a fix, a feature, research, a
 decision, a refactor): what was asked, how things stood, how they stand now,
@@ -51,10 +52,23 @@ Code: `bot/engine/recap.py`. Prompt: `config.RECAP_PROMPT` (with
   the light model, at the read-only floor with Bash closed, posts nothing of
   its own (its status line is deleted), dispatches no directives and writes no
   history. The last block on the masked text wins.
-- **The fallback is the facts alone.** No session, a reboot drain
-  (`check_spawn_allowed`), a failed spawn or an unparseable answer gives a card
-  built from the commit subject, the owner's first real message and the
-  changelog. `prepare` never raises.
+- **The fallback is the facts alone.** No session, a missing repo, a reboot
+  drain (`check_spawn_allowed`), another run holding the thread, a spent
+  budget, a failed spawn or an unparseable answer gives a card built from the
+  commit subject, the owner's first real message and the changelog. Each of
+  those is checked before the spawn, so the thread never gets spawn_from's
+  own refusal text in place of a card. `prepare` never raises.
+- **"What you asked" skips the go-ahead.** The owner's last messages are
+  read newest first and a bare approval ("go", "sgo", "yes do it") is
+  skipped by vocabulary (`_approval_only`), not by length: "fix login" is
+  short and a real request.
+- **"Nothing" is not an item.** A FOR_YOU or NEXT line that says there is
+  nothing ("none", "no follow-ups needed", "nothing for you right now") is
+  dropped (`_NONE_RE`), because an item that says "none" would hold the
+  thread open for nothing.
+- **Secrets are redacted before anything is clipped**, in the recap block and
+  in git's own merge lines, so a clip cannot cut a token in half and slip it
+  past the redactor.
 
 ## Things that must not drift
 
@@ -77,10 +91,15 @@ Code: `bot/engine/recap.py`. Prompt: `config.RECAP_PROMPT` (with
   ("The merge did not land"), above the conflict banner it points at, and a
   merge that stops (`kind="merge_stopped"`: it landed on a tree that must not
   ship) gets one under the warning it points at. Neither closes the thread.
-- **The step cards it replaces stay suppressed.** `lifecycle._end_card_follows`
-  skips the result card for a completed Done (chain or standalone) and for a
-  chain's release. Their status line names the version or commit instead
-  (`finalize_status`). A Done or release that asks a question is not
+- **The step cards it replaces stay suppressed, only when a card follows.**
+  `lifecycle._end_card_follows` skips the result card for a completed Done or
+  release only inside a caller that posts the end card: the chain runner,
+  `on_done` and `on_amend_done` set `recap.card_follows()` (a context
+  variable, so a run they await directly sees it). Their status line names
+  the version or commit instead (`finalize_status`). A retry of the same step
+  (/retry, a cooldown or pay-per-use retry) runs outside that context and
+  keeps its own result card and Merge/Discard buttons, because nothing will
+  post a card after it. A Done or release that asks a question is never
   suppressed, and nothing is closed on it.
 - **Next buttons send the full instruction.** The label is short; a tap sends
   `PICK_UP_PREFIX + label + ". " + message` (`choices.open_offer(messages=)`,
@@ -95,11 +114,23 @@ Code: `bot/engine/recap.py`. Prompt: `config.RECAP_PROMPT` (with
   open, unless the merge landed on a tree that must not ship.
 - **The record is per thread and small.** `recaps` in state.json holds one
   record per channel (message id, time, repo, headline, open items, held,
-  instance id, branch instance id). A newer card replaces it, Close drops it,
-  and records older than 30 days are pruned on the next write. That is also
-  how long the gate holds: Needs you stops listing a thread once someone
-  writes in it, but the gate keeps refusing until a newer card, Close or the
-  prune.
+  instance id, branch instance id). A newer card replaces it, but carries a
+  branch an earlier card still holds, so the newer card cannot close the
+  thread past it. Records older than 30 days are pruned on the next write.
+  That is also how long the gate holds: Needs you stops listing a thread once
+  someone writes in it, but the gate keeps refusing until a newer card, Close
+  or the prune.
+- **Close empties the record, it does not drop it.** The open items and the
+  hold are cleared and the thread is archived, but the card is still known as
+  the card: Close takes only its own row off (it sits alone for that reason,
+  because a tap strips a whole row), Missed and a held branch's row stay, and
+  a later Merge on that row still gets the card's handling instead of a
+  progress line written over the card.
+- **A card that cannot be posted closes nothing.** `post` tries the embed,
+  then the same card as a result message with its buttons, then bare text.
+  When nothing reaches the thread there is no record and no close, so the
+  thread is left as it was rather than archived with no word of why. A card
+  that posted but could not be recorded does not close either.
 - **Needs you lists open items** (`waiting` kind `open_items`) until someone
   writes in that thread, and for at most 7 days. One item per thread, like the
   other kinds.
@@ -114,7 +145,8 @@ Code: `bot/engine/recap.py`. Prompt: `config.RECAP_PROMPT` (with
   button rows. An image the session names goes through `images.resolve_image`
   and `sandbox.instance_confined`, then is copied to `DATA_DIR/recap_images` so
   it outlives the worktree; the adapter drops it on an upload error rather than
-  losing the card.
+  losing the card. Copies older than a week are deleted on the next keep
+  (`prune_images`).
 
 ## What this does not do
 

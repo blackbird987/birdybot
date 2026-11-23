@@ -120,12 +120,13 @@ async def _on_merge(ctx: RequestContext, inst: Instance, source_msg_id: str | No
             log.info("Merge tap on %s ignored: one is already running", inst.id)
             return
         _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Merge button")
+        on_card = recap.card_record(ctx.store, ctx.channel_id, source_msg_id) is not None
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
-            await _finish_resolved_branch(ctx, inst, msg, source_msg_id)
+            await _finish_resolved_branch(
+                ctx, inst, msg, await _off_card(ctx, source_msg_id, on_card))
             return
-        on_card = recap.card_record(ctx.store, ctx.channel_id, source_msg_id) is not None
         if on_card:
             # Tapped on the end card: the card stays, the progress and the
             # outcome go in a message of their own.
@@ -140,9 +141,21 @@ async def _on_merge(ctx: RequestContext, inst: Instance, source_msg_id: str | No
             ctx, inst, escaped, source_msg_id,
             keep_open=keep_open or on_card,
             kept_buttons=merge_failed_button_specs(inst.id),
+            on_card=on_card,
         )
         if on_card and not inst.branch:
             await recap.branch_resolved(ctx, keep_open=keep_open)
+
+
+async def _off_card(ctx: RequestContext, source_msg_id: str | None,
+                    on_card: bool) -> str | None:
+    """Where an "already resolved" answer goes: over the tapped message, or,
+    tapped on the end card, below it with the card's branch row taken off
+    (the card itself is never overwritten)."""
+    if not on_card:
+        return source_msg_id
+    await recap.take_branch_row_off(ctx, source_msg_id)
+    return None
 
 
 async def _on_discard(ctx: RequestContext, inst: Instance, source_msg_id: str | None) -> None:
@@ -150,13 +163,14 @@ async def _on_discard(ctx: RequestContext, inst: Instance, source_msg_id: str | 
         if not claimed:
             log.info("Discard tap on %s ignored: a merge or discard is running", inst.id)
             return
+        on_card = recap.card_record(ctx.store, ctx.channel_id, source_msg_id) is not None
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
             outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
-            await _finish_resolved_branch(ctx, inst, outcome.message, source_msg_id)
+            await _finish_resolved_branch(
+                ctx, inst, outcome.message, await _off_card(ctx, source_msg_id, on_card))
             return
-        on_card = recap.card_record(ctx.store, ctx.channel_id, source_msg_id) is not None
         if on_card:
             source_msg_id = await recap.move_branch_action_off_card(
                 ctx, source_msg_id, discard_progress_text(inst))
@@ -164,7 +178,8 @@ async def _on_discard(ctx: RequestContext, inst: Instance, source_msg_id: str | 
             await show_branch_progress(ctx, source_msg_id, discard_progress_text(inst))
         outcome = await perform_discard(ctx, inst, "Discard button")
         escaped = ctx.messenger.escape(outcome.message)
-        await _finish_branch_action(ctx, inst, escaped, source_msg_id, keep_open=on_card)
+        await _finish_branch_action(ctx, inst, escaped, source_msg_id,
+                                    keep_open=on_card, on_card=on_card)
         if on_card and not inst.branch:
             await recap.branch_resolved(ctx)
 

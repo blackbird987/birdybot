@@ -450,9 +450,12 @@ def _entry(label: str, launch, want_steps: list[str], *, want_label: str,
     check_eq(f"{label}: ordered steps", sc.order, want_steps)
     check_eq(f"{label}: persisted kwargs seen by every step",
              {c["kwargs"] for c in sc.calls}, {(want_label, want_silent)})
-    check_eq(f"{label}: finalized merge",
-             [f["close_silent"] for f in sc.finalized],
-             [want_silent] if merges else [])
+    check_eq(f"{label}: finalized merge", len(sc.finalized), 1 if merges else 0)
+    if merges:
+        # The end card owns the close and the ping: a silent-close preset
+        # posts it quietly, the others ping with it.
+        check_eq(f"{label}: end card ping follows the preset",
+                 [c["silent"] for c in sc.messenger.cards()], [want_silent])
     ev = sc.final_eval()
     check_eq(f"{label}: eval outcome", ev.get("outcome"), "merged" if merges else "completed")
     check_eq(f"{label}: eval completed == steps", ev.get("completed"), want_steps)
@@ -1016,8 +1019,8 @@ res = run(workflows.resume_autopilot_chain(s.ctx, SOURCE_ID, SOURCE_MSG, SESSION
 check_eq("resume skips the answered step and runs the rest",
          s.order, ["done", "verify_release", "release", "merge"])
 check_eq("resume restores the original label and silent close",
-         (s.calls[0]["kwargs"], s.finalized[-1]["close_silent"]),
-         (("Chain (ship)", True), True))
+         (s.calls[0]["kwargs"], [c["silent"] for c in s.messenger.cards()]),
+         (("Chain (ship)", True), [True]))
 check_eq("resume finishes and clears state", (s.queue, s.final_eval().get("outcome")),
          (None, "merged"))
 s.close()
@@ -1029,6 +1032,20 @@ s.behaviour = {}
 s.calls.clear()
 run(workflows.resume_autopilot_chain(s.ctx, SOURCE_ID, SOURCE_MSG, SESSION))
 check_eq("a single remaining step is re-run, not skipped", s.order, ["release"])
+s.close()
+
+# A restart between the release and the merge: the resumed chain starts at
+# its merge with no result of its own, and still ends on a card for the
+# instance it merged.
+s = scenario()
+s.store.set_autopilot_chain(SESSION, ["release", "merge"])
+s.store.set_chain_kwargs(SESSION, label="Chain (ship)", silent_close=True)
+run(workflows.resume_autopilot_chain(s.ctx, SOURCE_ID, SOURCE_MSG, SESSION))
+check_eq("resumed at the merge: only the merge runs", s.order, ["merge"])
+_cards = s.messenger.cards()
+check("resumed at the merge: the merged instance gets its end card",
+      len(_cards) == 1 and "Merged into" in _cards[0]["text"]
+      and len(s.finalized) == 1, repr(_cards))
 s.close()
 
 s = scenario()

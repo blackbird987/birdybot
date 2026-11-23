@@ -351,18 +351,17 @@ def finalize_status(text: str | None) -> str | None:
     return None
 
 
-def _end_card_follows(inst: Instance, has_chain: bool) -> bool:
+def _end_card_follows(inst: Instance) -> bool:
     """Whether this finished turn's result card is replaced by the end card.
 
-    A Done always ends in one (standalone in ``on_done``, in a chain at the
-    chain's end), and so does a chain's release. A /commit or a release
-    outside a chain does not, so those keep their card.
+    Only when the caller running it posts one (``recap.card_follows``):
+    ``on_done`` for a standalone Done, the chain for its Done and release.
+    A /commit, a lone /release, or a Done re-run by a cooldown retry or
+    /retry has no such caller, so it keeps its card and its Merge/Discard.
+    A question is never replaced: nothing is finished yet.
     """
-    if inst.needs_input or inst.status != InstanceStatus.COMPLETED:
-        return False
-    return inst.origin == InstanceOrigin.DONE or (
-        has_chain and inst.origin == InstanceOrigin.RELEASE
-    )
+    from bot.engine import recap
+    return recap.card_replaced(inst) and recap.card_will_follow()
 
 
 # These runs are read by their caller. They do not retry on a timer (a usage limit
@@ -1536,7 +1535,7 @@ async def send_result(
             # Strip the raw summary block from result_text
             result_text = strip_summary_block(result_text)
             meta["_finalize"] = finalize_info
-            if _end_card_follows(inst, has_chain):
+            if _end_card_follows(inst):
                 # The end card (bot/engine/recap.py) carries the changelog,
                 # version and run facts this card would repeat.
                 log.info("send_result: %s card left to the end card", inst.id)

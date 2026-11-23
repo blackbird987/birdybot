@@ -279,6 +279,7 @@ async def _finish_resolved_branch(
 async def _finish_branch_action(
     ctx: RequestContext, inst: Instance, escaped: str, source_msg_id: str | None,
     *, keep_open: bool = False, kept_buttons: list | None = None,
+    on_card: bool = False,
 ) -> None:
     """Post the outcome of a merge/discard and tidy up if the branch is gone.
 
@@ -289,22 +290,30 @@ async def _finish_branch_action(
     closing it would archive the only notice the user gets. `kept_buttons` go
     on the card when the branch survived: a failed merge's banner names Try
     Merge Again and Resolve, and the progress line took the old buttons away.
+
+    `on_card`: tapped on the end card, so `source_msg_id` is the outcome's own
+    line, not the result card. That line gets no buttons of the instance's
+    (the end card still has them), and an instance whose result card the end
+    card replaced has only a status line to strip, which must not gain any.
     """
-    # Pass updated buttons when branch was resolved (strips Merge/Discard)
-    buttons = action_button_specs(
-        inst, choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, source_msg_id),
-    ) if not inst.branch else kept_buttons
+    from bot.engine import recap
+    if on_card:
+        buttons = None if not inst.branch else kept_buttons
+    else:
+        # Pass updated buttons when branch was resolved (strips Merge/Discard)
+        buttons = action_button_specs(
+            inst, choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, source_msg_id),
+        ) if not inst.branch else kept_buttons
     if source_msg_id:
         await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
     else:
         await ctx.messenger.send_text(ctx.channel_id, escaped)
     # Also strip buttons from the result embed if it's a different message
-    if not inst.branch:
+    if not inst.branch and not (on_card and recap.card_replaced(inst)):
         await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
     # Close thread if this was a post-Done merge/discard (branch resolved)
     if inst.origin == InstanceOrigin.DONE and not inst.branch and not keep_open:
         # Through the end card's gate: a card with open items keeps it open.
-        from bot.engine import recap
         await recap.close_thread(
             ctx.store, ctx.messenger, ctx.channel_id, skip_mention=True,
         )

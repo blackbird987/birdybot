@@ -441,12 +441,6 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._recaps[str(channel_id)] = record
         self.save()
 
-    def pop_recap(self, channel_id: str) -> dict | None:
-        record = self._recaps.pop(str(channel_id), None)
-        if record is not None:
-            self.save()
-        return record
-
     def list_recaps(self) -> dict[str, dict]:
         return dict(self._recaps)
 

@@ -622,10 +622,13 @@ async def on_amend_done(
     vr.needs_input = False
     ctx.store.update_instance(vr)
 
-    done_result = await on_done(
-        ctx, verify_release_instance_id, source_msg_id,
-        prompt_variant="chain", extra_context=rationale or None,
-    )
+    # The chain's own Done, re-run: like the first one it leaves its card to
+    # the chain's end card, which the resume below posts.
+    with recap.card_follows():
+        done_result = await on_done(
+            ctx, verify_release_instance_id, source_msg_id,
+            prompt_variant="chain", extra_context=rationale or None,
+        )
     if (not done_result
             or done_result.status != InstanceStatus.COMPLETED
             or done_result.needs_input):
@@ -750,6 +753,10 @@ async def _run_autopilot_chain(
     # the step, not the conversation — see "A thread must always know its
     # session" in docs/design/thread-session-binding.md).
     ctx.runner.begin_task(chain_task_id)
+    # The chain posts the end card itself, so its Done and release turns leave
+    # theirs out (lifecycle._end_card_follows). A retry of one of them later
+    # runs outside this and keeps its own card.
+    card_token = recap.begin_card_follows()
     try:
         for step in steps:
             # Update remaining steps in session state for resume
@@ -1241,7 +1248,8 @@ async def _run_autopilot_chain(
                     # The end card's facts are read before the merge, while
                     # the branch still exists; the merge line goes into
                     # merge_report for the card instead of its own message,
-                    # and the card decides the close (bot/engine/recap.py).
+                    # and the card decides the close and the ping
+                    # (bot/engine/recap.py), so no close_silent here.
                     # stop_silent: on a STOPPED merge the exit mention below
                     # is the ping, so the warning itself posts quietly.
                     end_draft = await recap.prepare(
@@ -1249,7 +1257,7 @@ async def _run_autopilot_chain(
                         leftovers=len(chain_deferred or []),
                     )
                     merge_outcome = await _finalize_merge(
-                        ctx, merge_target, close_silent=silent_close,
+                        ctx, merge_target,
                         skip_close=True, stop_silent=True, report=merge_report,
                     )
                     merged = merge_outcome is MergeOutcome.MERGED
@@ -1487,15 +1495,19 @@ async def _run_autopilot_chain(
         # manual-check note, the not-delivered note, the merge line and the
         # "chain complete on branch" handoff (bot/engine/recap.py). Wrapped so
         # a Discord failure never leaves the chain state stuck in the store.
-        if result is not None:
+        # A chain resumed at its merge step (a restart mid-chain) has no
+        # result of its own: the instance it merged is the one the card is for.
+        final = result if result is not None else (
+            end_draft.final if end_draft is not None else None)
+        if final is not None:
             try:
-                held = bool("merge" not in steps and result.branch
-                            and result.original_branch)
+                held = bool("merge" not in steps and final.branch
+                            and final.original_branch)
                 hold_reason = (ctx.store.get_chain_hold_reason(session_id)
                                if held else None)
                 if end_draft is None:
                     end_draft = await recap.prepare(
-                        ctx, result, chain_instances=chain_instances,
+                        ctx, final, chain_instances=chain_instances,
                         leftovers=len(chain_deferred or []),
                         hold_reason=hold_reason,
                     )
@@ -1505,7 +1517,7 @@ async def _run_autopilot_chain(
                            else "")
                 await recap.post(ctx, end_draft, recap.EndState(
                     kind=kind, merge_notes=merge_report, decided_note=decided,
-                    branch_instance_id=result.id if held else None,
+                    branch_instance_id=final.id if held else None,
                 ), close=merged, loud=not silent_close)
             except Exception:
                 log.exception("End card failed for chain %s", source_id)
@@ -1513,6 +1525,7 @@ async def _run_autopilot_chain(
         ctx.store.clear_chain_state(session_id)
         return result
     finally:
+        recap.end_card_follows(card_token)
         ctx.runner.end_task(chain_task_id)
 
 

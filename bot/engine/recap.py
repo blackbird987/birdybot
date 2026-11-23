@@ -24,7 +24,12 @@ fails to say falls back to the bot's own facts: the card always posts.
 
 A card with anything open never closes its thread. ``close_thread`` is the one
 door every bot-initiated close goes through, and it refuses while the thread's
-end card still has open items. The card's Close button is the override.
+end card still has open items or a held branch waiting for Merge or Discard.
+The card's Close button is the override.
+
+Only the caller that posts the card knows one is coming, so it says so
+(``card_follows``): a Done or a release finishing inside it leaves its own
+result card out. The same turn retried later runs outside it and keeps its own.
 
 Design note: ``docs/design/session-recap.md``. Harness:
 ``scripts/test_session_recap.py``.
@@ -33,6 +38,8 @@ Design note: ``docs/design/session-recap.md``. Harness:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import logging
 import re
 import shutil
@@ -60,6 +67,7 @@ OWNER_MSGS_MAX = 4
 DO_ALL_LABEL = "Do all"
 CLOSE_ACTION = "recap_close"
 IMAGE_DIR_NAME = "recap_images"
+IMAGE_KEEP_S = 7 * 86400   # kept pictures older than this are deleted
 # What a Next button sends. A label alone ("Fix the flaky test") reads as a
 # fresh request with no context; this says where it came from.
 PICK_UP_PREFIX = "Pick up this open item from the end card: "
@@ -70,7 +78,67 @@ _KEY_RE = re.compile(
     r"^\s*(HEADLINE|ASKED|BEFORE|NOW|FOR_YOU|NEXT|IMAGE)\s*:\s*(.*)$", re.I,
 )
 _BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
-_NONE_RE = re.compile(r"^\(?\s*(?:none|nothing|n/?a|-)\s*[.)]?\s*$", re.I)
+# A "nothing here" answer, in the phrasings a model actually writes. Anchored
+# at both ends, so a real item that merely starts with "No" ("No tests cover
+# the parser; add them") is kept.
+_NONE_RE = re.compile(
+    r"^\(?\s*(?:none|nothing(?: else| more)?|n/?a|-+|"
+    r"no (?:open (?:items?|points?)|follow[- ]?ups?|actions?|next steps?|"
+    r"further (?:work|steps?|actions?)|more work|todos?|to-dos?))"
+    r"(?:\s+(?:needed|required|left|open|pending|to do|from you|"
+    r"for (?:you|now|the user)|right now|at the moment|at this (?:point|time)))*"
+    r"\s*[.!)]*\s*$",
+    re.I,
+)
+
+
+# --- Who posts the card ----------------------------------------------------
+
+# Set while a caller that posts the end card itself is running (a standalone
+# Done in ``steps.on_done``, a chain in ``_run_autopilot_chain``): a Done or a
+# release finishing inside it leaves its own result card out. A retry of that
+# same turn (cooldown retry, /retry, pay-per-use) re-runs outside any such
+# caller and nothing would post a card for it, so it keeps its own.
+_CARD_FOLLOWS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "recap_card_follows", default=False,
+)
+
+
+def begin_card_follows() -> contextvars.Token:
+    return _CARD_FOLLOWS.set(True)
+
+
+def end_card_follows(token: contextvars.Token) -> None:
+    _CARD_FOLLOWS.reset(token)
+
+
+@contextlib.contextmanager
+def card_follows():
+    """The code inside posts the end card itself."""
+    token = begin_card_follows()
+    try:
+        yield
+    finally:
+        end_card_follows(token)
+
+
+def card_will_follow() -> bool:
+    """Whether the running caller will post the end card."""
+    return _CARD_FOLLOWS.get()
+
+
+# The turns whose result card the end card replaces when it follows them.
+REPLACED_ORIGINS = frozenset({InstanceOrigin.DONE, InstanceOrigin.RELEASE})
+
+
+def card_replaced(inst: Instance) -> bool:
+    """A finished turn of a kind whose result card an end card replaces.
+
+    For a turn the end card is about (its branch instance), the result card
+    was left out and the turn's last message is its status line.
+    """
+    return (inst.origin in REPLACED_ORIGINS and not inst.needs_input
+            and inst.status == InstanceStatus.COMPLETED)
 
 # Merge notes that mean something did not happen: they belong under "For you".
 _PROBLEM_NOTE_RE = re.compile(
@@ -165,6 +233,10 @@ def parse_recap(text: str | None) -> Recap | None:
                 continue
         if not value:
             continue
+        if key != "IMAGE":
+            # Before any clip: a cut can split a token so the redactor no
+            # longer recognises the half that is left.
+            value = redact_secrets(value)
         if key == "HEADLINE":
             rec.headline = rec.headline or _clip(value, HEADLINE_MAX)
         elif key == "ASKED":
@@ -306,9 +378,26 @@ def git_facts(repo: str | None, branch: str | None, target: str | None,
     return out
 
 
+# Words that approve or acknowledge without asking for anything. A message
+# made only of these ("go", "sgo", "yes go ahead", "ok ship it") is the owner
+# saying yes to the work, never the request behind it.
+_APPROVAL_WORDS = frozenset({
+    "go", "sgo", "ship", "it", "yes", "yep", "yeah", "y", "ok", "okay", "k",
+    "sure", "do", "build", "lgtm", "approved", "approve", "merge", "continue",
+    "proceed", "please", "pls", "thanks", "thank", "you", "ahead", "and",
+    "now", "go-ahead", "sounds", "good", "great", "perfect", "nice", "cool",
+    "fine", "both", "all", "that", "this", "the", "plan", "then", "verify",
+    "release", "let", "lets", "s",
+})
+
+
 def _approval_only(text: str) -> bool:
-    words = re.sub(r"[^a-z ]", " ", text.lower()).split()
-    return len(" ".join(words)) < 16
+    """A bare go-ahead ("go", "sgo", "yes do it"), or no words at all.
+
+    By vocabulary, not length: "fix login" is short and a real request.
+    """
+    words = re.sub(r"[^a-z\- ]", " ", (text or "").lower()).split()
+    return len(words) <= 6 and all(w in _APPROVAL_WORDS for w in words)
 
 
 async def gather_facts(
@@ -446,11 +535,20 @@ async def run_recap_turn(ctx, final: Instance, facts: Facts) -> Recap | None:
     Resumes the session, read-only at the floor that also closes Bash, on the
     light model, and posts nothing of its own.
     """
-    if not final.session_id:
+    if not final.session_id or not final.repo_path or not Path(final.repo_path).is_dir():
         return None
+    # spawn_from tells the user why it refused, which on a card that posts
+    # anyway is only noise: each of its refusals is checked here first and
+    # skipped quietly, and the card goes out with the bot's facts alone.
     try:
+        from bot.engine import cmd_state
         if ctx.runner.check_spawn_allowed():
             # A drain would queue it as a button replay with no handler.
+            return None
+        if ctx.channel_id is not None and ctx.runner.active_instance_for_channel(
+                ctx.channel_id):
+            return None
+        if not cmd_state.check_budget(ctx):
             return None
     except Exception:
         return None
@@ -494,12 +592,33 @@ def keep_image(store, final: Instance, raw: str | None, *, ctx=None) -> str | No
             return None
         dest_dir = config.DATA_DIR / IMAGE_DIR_NAME
         dest_dir.mkdir(parents=True, exist_ok=True)
+        prune_images(dest_dir)
         dest = dest_dir / f"{final.id}{path.suffix.lower()}"
         shutil.copyfile(path, dest)
         return str(dest)
     except Exception:
         log.info("End card: picture %r could not be kept", raw, exc_info=True)
         return None
+
+
+def prune_images(dest_dir: Path, *, max_age_s: float = IMAGE_KEEP_S,
+                 now: float | None = None) -> int:
+    """Delete kept pictures older than ``max_age_s``. A posted card holds its
+    own copy on Discord, so the file is only needed until the card is sent.
+    Returns how many went. Never raises."""
+    now = time.time() if now is None else now
+    gone = 0
+    try:
+        for p in dest_dir.iterdir():
+            try:
+                if p.is_file() and now - p.stat().st_mtime > max_age_s:
+                    p.unlink()
+                    gone += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return gone
 
 
 async def prepare(
@@ -518,9 +637,12 @@ async def prepare(
         log.warning("End card: no facts for %s", final.id, exc_info=True)
         facts = Facts(repo=final.repo_name or "")
     draft = Draft(final=final, facts=facts)
-    draft.recap = await run_recap_turn(ctx, final, facts)
-    if draft.recap and draft.recap.image:
-        draft.image_path = keep_image(ctx.store, final, draft.recap.image, ctx=ctx)
+    try:
+        draft.recap = await run_recap_turn(ctx, final, facts)
+        if draft.recap and draft.recap.image:
+            draft.image_path = keep_image(ctx.store, final, draft.recap.image, ctx=ctx)
+    except Exception:
+        log.warning("End card: no recap for %s", final.id, exc_info=True)
     return draft
 
 
@@ -571,13 +693,15 @@ def split_merge_notes(notes: list[str]) -> tuple[list[str], list[str]]:
             if not ln:
                 continue
             if ln.startswith("`") and last is not None and last:
-                last[-1] = f"{last[-1]} ({ln.strip('`')})"
+                last[-1] = _clip(f"{last[-1]} ({redact_secrets(ln.strip('`'))})",
+                                 BULLET_CHARS)
                 continue
             if _NOISE_NOTE_RE.match(ln):
                 last = None
                 continue
             target = problems if _PROBLEM_NOTE_RE.match(ln) else other
-            target.append(_clip(ln, BULLET_CHARS))
+            # Git's own words can carry a remote URL with a token in it.
+            target.append(_clip(redact_secrets(ln), BULLET_CHARS))
             last = target
     return problems, other
 
@@ -720,7 +844,12 @@ def pick_up_messages(items: list[NextItem]) -> tuple[list[str], list[str]]:
 
 
 def card_buttons(card: Card, iid: str, state: EndState) -> list[list[ButtonSpec]]:
-    """Next row, the held branch's row, then Close and Missed. At most 3 rows."""
+    """Next row, the held branch's row, Close, then Missed. At most 4 rows.
+
+    Close and the branch each sit on a row of their own because a tap takes
+    its row off the card whole (``strip_button_rows``): sharing one would
+    take Missed, or the branch's other buttons, along with it.
+    """
     from bot.platform.buttons import choice_row_specs
     rows: list[list[ButtonSpec]] = []
     if card.next_items:
@@ -731,11 +860,9 @@ def card_buttons(card: Card, iid: str, state: EndState) -> list[list[ButtonSpec]
         rows.append([ButtonSpec("Merge", f"merge:{bid}"),
                      ButtonSpec("Discard", f"discard:{bid}"),
                      ButtonSpec("Diff", f"diff:{bid}")])
-    last: list[ButtonSpec] = []
     if card.open_items or card.held:
-        last.append(ButtonSpec("Close", f"{CLOSE_ACTION}:{iid}"))
-    last.append(ButtonSpec("Missed", f"missed:{iid}"))
-    rows.append(last)
+        rows.append([ButtonSpec("Close", f"{CLOSE_ACTION}:{iid}")])
+    rows.append([ButtonSpec("Missed", f"missed:{iid}")])
     return rows
 
 
@@ -763,45 +890,85 @@ async def post(
     buttons = card_buttons(card, iid, state)
     pings = (loud or card.open_items or card.held) and state.kind not in _TROUBLE_KINDS
     mention = ctx.user_id if pings else None
-    msg_id: str | None = None
-    try:
-        send_card = getattr(ctx.messenger, "send_card", None)
-        if send_card is not None:
-            msg_id = await send_card(ctx.channel_id, card.spec, buttons=buttons,
-                                     silent=mention is None, mention_user_id=mention)
-        else:
-            msg_id = await ctx.messenger.send_result(
-                ctx.channel_id, ctx.messenger.markdown_to_markup(card.spec.as_text()),
-                buttons=buttons, silent=mention is None, mention_user_id=mention)
-    except Exception:
-        log.exception("End card: posting failed for %s", iid)
+    msg_id = await _send(ctx, card, buttons, mention)
+    if not msg_id:
+        # Nothing reached the thread, so nothing says what is open or that
+        # the work is done: leave the thread as it is, open.
+        log.error("End card: nothing could be posted in %s for %s", ctx.channel_id, iid)
         return None
-    if msg_id and card.next_items:
-        from bot.engine.directives import choices
-        labels, msgs = pick_up_messages(card.next_items)
-        choices.open_offer(ctx, draft.final, labels, str(msg_id), messages=msgs)
+    if card.next_items:
+        try:
+            from bot.engine.directives import choices
+            labels, msgs = pick_up_messages(card.next_items)
+            choices.open_offer(ctx, draft.final, labels, str(msg_id), messages=msgs)
+        except Exception:
+            log.warning("End card: the Next offer for %s was not recorded", iid,
+                        exc_info=True)
+    branch_id = (state.branch_instance_id or iid) if card.held else None
+    prev = _record(ctx.store, ctx.channel_id)
+    if branch_id is None and _holds_branch(ctx.store, prev):
+        # An earlier card's branch is still waiting for Merge or Discard:
+        # this card replaces that record, so it carries the hold forward and
+        # the gate keeps the thread open until that branch is resolved.
+        branch_id = prev.get("branch_instance_id") or prev.get("instance_id")
     record = {
-        "msg_id": str(msg_id) if msg_id else None,
+        "msg_id": str(msg_id),
         "posted_at": time.time(),
         "repo": draft.final.repo_name,
         "headline": card.spec.title,
         "open_items": card.open_items,
-        "held": card.held,
+        "held": branch_id is not None,
         "instance_id": iid,
-        "branch_instance_id": state.branch_instance_id if card.held else None,
+        "branch_instance_id": branch_id,
     }
+    recorded = True
     try:
         ctx.store.put_recap(ctx.channel_id, record)
     except Exception:
+        recorded = False
         log.warning("End card: could not record the card for %s", ctx.channel_id,
                     exc_info=True)
-    from bot.engine import waiting
-    waiting.notify_changed()
+    _notify_waiting()
     log.info("End card posted in %s for %s (%s, %d open)", ctx.channel_id, iid,
              state.kind, len(card.open_items))
-    if close:
+    # An unrecorded card leaves the gate reading an older record, so only a
+    # recorded one may close the thread.
+    if close and recorded:
         await close_thread(ctx.store, ctx.messenger, ctx.channel_id, skip_mention=True)
-    return str(msg_id) if msg_id else None
+    return str(msg_id)
+
+
+async def _send(ctx, card: Card, buttons: list[list[ButtonSpec]],
+                mention: str | None) -> str | None:
+    """Post the card: as an embed, else as a plain result message, else as
+    bare text. The message id, or None when nothing went out."""
+    silent = mention is None
+    send_card = getattr(ctx.messenger, "send_card", None)
+    if send_card is not None:
+        try:
+            msg_id = await send_card(ctx.channel_id, card.spec, buttons=buttons,
+                                     silent=silent, mention_user_id=mention)
+            if msg_id:
+                return str(msg_id)
+        except Exception:
+            log.warning("End card: the embed was refused, sending it as text",
+                        exc_info=True)
+    text = card.spec.as_text()
+    try:
+        msg_id = await ctx.messenger.send_result(
+            ctx.channel_id, ctx.messenger.markdown_to_markup(text),
+            buttons=buttons, silent=silent, mention_user_id=mention)
+        if msg_id:
+            return str(msg_id)
+    except Exception:
+        log.warning("End card: the text card was refused too", exc_info=True)
+    try:
+        msg_id = await ctx.messenger.send_text(ctx.channel_id, _cut(text, 1900),
+                                               silent=silent)
+        return str(msg_id) if msg_id else None
+    except Exception:
+        log.exception("End card: no message could be posted")
+        return None
 
 
 def _record(store, channel_id: str | None) -> dict | None:
@@ -890,11 +1057,17 @@ async def _strip(ctx, msg_id: str | None, prefix: str) -> None:
         log.debug("Could not strip %s rows from %s", prefix, msg_id, exc_info=True)
 
 
+async def take_branch_row_off(ctx, msg_id: str | None) -> None:
+    """Take the held branch's Merge/Discard/Diff row off the card. Its other
+    rows stay: the card is never redrawn from specs."""
+    await _strip(ctx, msg_id, "merge:")
+
+
 async def move_branch_action_off_card(ctx, msg_id: str, progress: str) -> str | None:
     """A Merge or Discard tapped on the card: take that row off the card
-    (its other rows stay, it is never redrawn from specs) and post the
-    progress line as its own message, which the outcome then replaces."""
-    await _strip(ctx, msg_id, "merge:")
+    and post the progress line as its own message, which the outcome then
+    replaces."""
+    await take_branch_row_off(ctx, msg_id)
     try:
         return await ctx.messenger.send_text(ctx.channel_id, progress, silent=True)
     except Exception:
@@ -913,24 +1086,47 @@ async def branch_resolved(ctx, *, keep_open: bool = False) -> None:
         except Exception:
             log.warning("End card: could not update the record in %s",
                         ctx.channel_id, exc_info=True)
+    _notify_waiting()
     if not keep_open:
         await close_thread(ctx.store, ctx.messenger, ctx.channel_id, skip_mention=True)
 
 
 async def on_close_tap(ctx, instance_id: str, source_msg_id: str | None) -> None:
-    """Close: the owner says the open items can wait. Drops the record, the
-    offer and the card's rows, then archives the thread past the gate."""
+    """Close: the owner says the open items can wait. Clears the card's open
+    items, closes its Next offer, takes the Close row off, then archives the
+    thread past the gate.
+
+    The record stays, emptied, so the card is still known as the card: its
+    held branch keeps its Merge, Discard and Diff row, and a later tap on it
+    still gets the card's handling (the card kept, the outcome posted below
+    it) rather than the card being overwritten with a progress line. Missed
+    keeps its row too.
+    """
+    rec = _record(ctx.store, ctx.channel_id)
+    if rec is not None:
+        rec = dict(rec, open_items=[], held=False, closed_at=time.time())
+        try:
+            ctx.store.put_recap(ctx.channel_id, rec)
+        except Exception:
+            log.warning("End card: could not clear the record in %s",
+                        ctx.channel_id, exc_info=True)
     try:
-        ctx.store.pop_recap(ctx.channel_id)
+        from bot.engine.directives import choices
+        await choices.close_offer(ctx, ctx.channel_id, "closed")
     except Exception:
-        log.debug("No end card record to drop in %s", ctx.channel_id, exc_info=True)
-    from bot.engine.directives import choices
-    await choices.close_offer(ctx, ctx.channel_id, "closed")
-    for prefix in (f"{CLOSE_ACTION}:", "merge:"):
-        await _strip(ctx, source_msg_id, prefix)
-    from bot.engine import waiting
-    waiting.notify_changed()
+        log.debug("Could not close the Next offer in %s", ctx.channel_id, exc_info=True)
+    await _strip(ctx, source_msg_id, f"{CLOSE_ACTION}:")
+    _notify_waiting()
     try:
         await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
     except Exception:
         log.debug("Close of %s failed", ctx.channel_id, exc_info=True)
+
+
+def _notify_waiting() -> None:
+    """Tell the Needs-you views the thread's open items changed. Never raises."""
+    try:
+        from bot.engine import waiting
+        waiting.notify_changed()
+    except Exception:
+        log.debug("Needs-you refresh failed", exc_info=True)

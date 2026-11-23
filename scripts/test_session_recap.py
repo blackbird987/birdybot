@@ -127,11 +127,15 @@ class _Messenger:
 
 
 class _Runner:
-    def __init__(self, draining: bool = False) -> None:
+    def __init__(self, draining: bool = False, active: str | None = None) -> None:
         self.draining = draining
+        self.active = active
 
     def check_spawn_allowed(self):
         return "Reboot in progress" if self.draining else None
+
+    def active_instance_for_channel(self, _cid):  # noqa: ANN001
+        return self.active
 
 
 def _store(tmp: Path) -> StateStore:
@@ -226,6 +230,26 @@ def case_parse() -> None:
     img = recap.parse_recap("```recap\nHEADLINE: x\nIMAGE: `docs/shot.png`\n```")
     _check("parse: image path unquoted", img.image == "docs/shot.png", img.image)
 
+    # The phrasings a model writes for "nothing here" are nothing, and a real
+    # item that merely starts with "No" is kept.
+    for phrase in ("None.", "(none)", "Nothing for you.", "none needed", "nothing left",
+                   "No open items", "no follow-ups", "No action needed from you",
+                   "no next steps", "No further work.", "N/A", "-", "Nothing to do"):
+        _check(f"parse: none phrasing {phrase!r}", recap._is_none(phrase))
+    for real in ("No tests cover the parser; add them", "Nothing logs the retry, add a line",
+                 "Log in on a phone", "None of the old tokens were revoked: revoke them"):
+        _check(f"parse: real item {real!r} kept", not recap._is_none(real))
+    nonep = recap.parse_recap("```recap\nHEADLINE: x\nFOR_YOU:\n- No action needed.\n"
+                              "NEXT:\n- No further work\n```")
+    _check("parse: none phrasing dropped from lists", nonep.for_you == [] and nonep.next == [],
+           (nonep.for_you, nonep.next))
+
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    leak = recap.parse_recap("```recap\nHEADLINE: x\nNOW:\n- " + "w " * 100
+                             + token + "\n```")
+    _check("parse: a secret is redacted before the clip", leak is not None
+           and "ghp_" not in " ".join(leak.now), leak.now if leak else None)
+
 
 # --- the card --------------------------------------------------------------
 
@@ -260,8 +284,9 @@ def case_cards() -> None:
     _check("open: next field numbered", (_field(c, "Next") or "").startswith("1. **Add the expiry test**"),
            _field(c, "Next"))
     rows = recap.card_buttons(c, "t-1", recap.EndState(kind="merged"))
+    # Close on a row of its own: a tap strips its row whole, and Missed stays.
     _check("open: rows", _ids(rows) == [["choice:t-1:0", "choice:t-1:1", "choice:t-1:2"],
-                                       ["recap_close:t-1", "missed:t-1"]], _ids(rows))
+                                       ["recap_close:t-1"], ["missed:t-1"]], _ids(rows))
     _check("open: Do all label", rows[0][-1].label == recap.DO_ALL_LABEL)
     _check("open: field order", [n for n, _ in c.spec.fields] ==
            ["You asked", "Before", "Now", "For you", "Next"], c.spec.fields)
@@ -278,7 +303,7 @@ def case_cards() -> None:
     _check("held: gold", c.spec.color == "gold")
     rows = recap.card_buttons(c, "t-1", recap.EndState(kind="held", branch_instance_id="t-9"))
     _check("held: rows", _ids(rows) == [["merge:t-9", "discard:t-9", "diff:t-9"],
-                                       ["recap_close:t-1", "missed:t-1"]], _ids(rows))
+                                       ["recap_close:t-1"], ["missed:t-1"]], _ids(rows))
 
     # A merge that went wrong: gold, and the status says what happened.
     sf = recap.Facts(repo="bot", version="v1.2.3", branch="b", target="master")
@@ -333,6 +358,10 @@ def case_cards() -> None:
     _check("tag push: noise dropped", "Tags pushed" not in nf and "No remote" not in nf
            and "Merged into" not in nf, nf)
     _check("tag push: other note kept", "Deploy queued for bot" in nf, nf)
+    secret_notes = ["Merged\nCould not push to https://x:ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8@github.com/a/b\n"
+                    "`fatal: https://x:ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8@github.com denied`"]
+    probs, _other = recap.split_merge_notes(secret_notes)
+    _check("merge notes: redacted", probs and "ghp_A1b2" not in probs[0], probs)
 
     # The bot's own lines, leftovers and the decided line.
     bf = recap.Facts(repo="bot", commit="abc1234", manual_checks=["the phone layout"],
@@ -497,6 +526,27 @@ def case_recap_turn(tmp: Path) -> None:
         _check("turn: skipped in a drain", rec is None and not seen, seen)
         rec = asyncio.run(recap.run_recap_turn(_ctx(store), _inst(session_id=None), recap.Facts()))
         _check("turn: no session, no turn", rec is None and not seen)
+
+        # Each refusal spawn_from would explain in the thread is skipped
+        # quietly instead: the card goes out on the bot's facts alone.
+        m = _Messenger()
+        rec = asyncio.run(recap.run_recap_turn(
+            _ctx(store, m, runner=_Runner(active="t-other")), final, recap.Facts()))
+        _check("turn: skipped while another run holds the thread",
+               rec is None and not seen and not m.sent, (seen, m.sent))
+        from bot.engine import cmd_state
+        orig_budget = cmd_state.check_budget
+        cmd_state.check_budget = lambda _ctx: False
+        try:
+            m = _Messenger()
+            rec = asyncio.run(recap.run_recap_turn(_ctx(store, m), final, recap.Facts()))
+            _check("turn: skipped over budget, nothing said", rec is None and not seen
+                   and not m.sent, (seen, m.sent))
+        finally:
+            cmd_state.check_budget = orig_budget
+        rec = asyncio.run(recap.run_recap_turn(
+            _ctx(store), _inst("t-gone", repo_path=str(tmp / "no-such-repo")), recap.Facts()))
+        _check("turn: skipped when the repo is gone", rec is None and not seen, seen)
     finally:
         step_spawn.spawn_from = orig
 
@@ -508,6 +558,17 @@ def case_recap_turn(tmp: Path) -> None:
         _check("prepare: never raises", d.recap is None and d.facts.repo == "bot", d)
     finally:
         step_spawn.spawn_from = orig
+
+    orig_turn = recap.run_recap_turn
+
+    async def turn_boom(*_a, **_kw):
+        raise RuntimeError("the turn itself raised")
+    recap.run_recap_turn = turn_boom
+    try:
+        d = asyncio.run(recap.prepare(_ctx(store, _Messenger()), final))
+        _check("prepare: survives the turn raising", d.recap is None and d.facts.repo == "bot", d)
+    finally:
+        recap.run_recap_turn = orig_turn
 
     # Pinned by source: the floor and the origin sets.
     _check("origin: caller-read", InstanceOrigin.RECAP in lifecycle._CALLER_READS_ORIGINS)
@@ -533,6 +594,20 @@ def case_image(tmp: Path) -> None:
            and Path(kept).read_bytes() == b"\x89PNG fake", kept)
     _check("image: outside the repo refused", recap.keep_image(store, final, str(outside / "x.png")) is None)
     _check("image: not an image refused", recap.keep_image(store, final, str(ROOT / "README.md")) is None)
+
+    # Kept pictures do not pile up: a week-old one goes on the next keep.
+    pdir = tmp / "prune"
+    pdir.mkdir()
+    old, fresh = pdir / "t-old.png", pdir / "t-new.png"
+    old.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    import os
+    week = time.time() - recap.IMAGE_KEEP_S - 60
+    os.utime(old, (week, week))
+    gone = recap.prune_images(pdir)
+    _check("image: old picture pruned", gone == 1 and not old.exists() and fresh.exists(),
+           (gone, old.exists(), fresh.exists()))
+    _check("image: prune of a missing dir is quiet", recap.prune_images(tmp / "nope") == 0)
     _check("image: none", recap.keep_image(store, final, None) is None)
 
     orig = sandbox.instance_confined
@@ -599,10 +674,13 @@ def case_post_and_gate(tmp: Path) -> None:
     _check("gate: refuses while open", closed is False and m.closed == [], m.closed)
     # The Close button is the override.
     asyncio.run(recap.on_close_tap(ctx, "t-1", mid))
-    _check("close tap: record dropped", store.get_recap("chan-1") is None)
+    rec = store.get_recap("chan-1")
+    _check("close tap: record kept, emptied", rec and rec["msg_id"] == mid
+           and rec["open_items"] == [] and rec["held"] is False, rec)
+    _check("close tap: still known as the card", recap.card_record(store, "chan-1", mid) is not None)
     _check("close tap: offer closed", store.get_choice_offer("chan-1") is None)
-    _check("close tap: rows stripped", (mid, "recap_close:") in m.stripped
-           and (mid, "merge:") in m.stripped, m.stripped)
+    _check("close tap: only the Close row off the card", (mid, "recap_close:") in m.stripped
+           and not any(pfx in ("merge:", "missed:") for _mid, pfx in m.stripped), m.stripped)
     _check("close tap: closed", m.closed == [("chan-1", True)], m.closed)
     closed = asyncio.run(recap.close_thread(store, _Messenger(), "chan-1"))
     _check("gate: closes once nothing is open", closed is True)
@@ -612,6 +690,57 @@ def case_post_and_gate(tmp: Path) -> None:
     asyncio.run(recap.post(_ctx(store, m, cid="chan-2"), _draft(final=final, rec=clean),
                            recap.EndState(kind="local"), close=False))
     _check("fallback post: as text", m.sent and m.sent[0][0].startswith("**Done**"), m.sent)
+
+    # The embed refused: the same card goes out as text, buttons and all.
+    class _Refusing(_Messenger):
+        def __init__(self, result_ok: bool = True, text_ok: bool = True) -> None:
+            super().__init__()
+            self.result_ok, self.text_ok = result_ok, text_ok
+
+        async def send_card(self, *_a, **_kw):
+            raise RuntimeError("embed refused")
+
+        async def send_result(self, *a, **kw):
+            if not self.result_ok:
+                raise RuntimeError("refused")
+            return await super().send_result(*a, **kw)
+
+        async def send_text(self, *a, **kw):
+            if not self.text_ok:
+                raise RuntimeError("refused")
+            return await super().send_text(*a, **kw)
+
+    m = _Refusing()
+    mid2 = asyncio.run(recap.post(_ctx(store, m, cid="chan-2b"), _draft(final=final, rec=clean),
+                                  recap.EndState(kind="local"), close=True))
+    _check("refused embed: posted as text with its buttons", mid2 and len(m.sent) == 1
+           and m.sent[0][1] and _ids(m.sent[0][1])[-1] == ["missed:t-1"], m.sent)
+    _check("refused embed: recorded and closed", store.get_recap("chan-2b")["msg_id"] == mid2
+           and m.closed == [("chan-2b", True)], (store.get_recap("chan-2b"), m.closed))
+
+    # Nothing could be posted: no record, and the thread stays as it is.
+    m = _Refusing(result_ok=False, text_ok=False)
+    mid2 = asyncio.run(recap.post(_ctx(store, m, cid="chan-2c"), _draft(final=final, rec=clean),
+                                  recap.EndState(kind="local"), close=True))
+    _check("nothing posted: no record, not closed", mid2 is None
+           and store.get_recap("chan-2c") is None and m.closed == [],
+           (mid2, store.get_recap("chan-2c"), m.closed))
+
+    # The Next offer failing to record does not lose the card.
+    orig_offer = choices.open_offer
+
+    def offer_boom(*_a, **_kw):
+        raise RuntimeError("offer store broke")
+    choices.open_offer = offer_boom
+    try:
+        m = _Messenger()
+        mid2 = asyncio.run(recap.post(_ctx(store, m, cid="chan-2d"), _draft(final=final, rec=rec_full),
+                                      recap.EndState(kind="merged"), close=True))
+        _check("offer failure: card posted and recorded", mid2 and len(m.cards) == 1
+               and store.get_recap("chan-2d")["open_items"], store.get_recap("chan-2d"))
+        _check("offer failure: still never closes with open items", m.closed == [], m.closed)
+    finally:
+        choices.open_offer = orig_offer
 
     # Held: never closes even with close=True, and a branch tap resolves it.
     m = _Messenger()
@@ -642,6 +771,15 @@ def case_post_and_gate(tmp: Path) -> None:
     closed = asyncio.run(recap.close_thread(store, m, "chan-4", skip_mention=True))
     _check("held gate: refuses while the branch exists", closed is False and m.closed == [],
            m.closed)
+    # A newer card in the same thread replaces the record but carries the
+    # waiting branch forward, so it cannot close the thread past it.
+    m2 = _Messenger()
+    asyncio.run(recap.post(_ctx(store, m2, cid="chan-4"), _draft(final=final, rec=clean),
+                           recap.EndState(kind="merged"), close=True))
+    rec4 = store.get_recap("chan-4")
+    _check("held carry: a newer card keeps the branch's hold", m2.closed == []
+           and rec4["held"] is True and rec4["branch_instance_id"] == "t-7"
+           and rec4["instance_id"] == "t-1", (m2.closed, rec4))
     branch_inst.branch = None          # a typed /merge or fleet ship
     store.update_instance(branch_inst)
     closed = asyncio.run(recap.close_thread(store, m, "chan-4", skip_mention=True))
@@ -700,11 +838,44 @@ def case_wiring() -> None:
     rel = _inst(origin=InstanceOrigin.RELEASE)
     com = _inst(origin=InstanceOrigin.COMMIT)
     asking = _inst(origin=InstanceOrigin.DONE, needs_input=True)
-    _check("suppress: Done", lifecycle._end_card_follows(done, False))
-    _check("suppress: chain release", lifecycle._end_card_follows(rel, True))
-    _check("suppress: not a lone release", not lifecycle._end_card_follows(rel, False))
-    _check("suppress: not a commit", not lifecycle._end_card_follows(com, True))
-    _check("suppress: not a question", not lifecycle._end_card_follows(asking, False))
+    failed = _inst(origin=InstanceOrigin.DONE, status=InstanceStatus.FAILED)
+    # Outside a caller that posts the card (a /retry, a cooldown retry), the
+    # run keeps its own result and buttons.
+    _check("suppress: not without a card coming", not lifecycle._end_card_follows(done)
+           and not lifecycle._end_card_follows(rel) and not recap.card_will_follow())
+    with recap.card_follows():
+        _check("suppress: Done", lifecycle._end_card_follows(done))
+        _check("suppress: chain release", lifecycle._end_card_follows(rel))
+        _check("suppress: not a commit", not lifecycle._end_card_follows(com))
+        _check("suppress: not a question", not lifecycle._end_card_follows(asking))
+        _check("suppress: not a failure", not lifecycle._end_card_follows(failed))
+    _check("suppress: the context resets", not recap.card_will_follow())
+    tok = recap.begin_card_follows()
+    try:
+        _check("suppress: token form", recap.card_will_follow())
+    finally:
+        recap.end_card_follows(tok)
+    _check("suppress: token resets", not recap.card_will_follow())
+
+    async def in_task() -> bool:
+        return recap.card_will_follow()
+
+    async def outer() -> tuple[bool, bool]:
+        with recap.card_follows():
+            inside = await in_task()
+            # A task created inside copies the context: a spawn_from run
+            # awaited directly sees it, which is the point.
+            copied = await asyncio.create_task(in_task())
+        return inside, copied
+    _check("suppress: an awaited run sees it", asyncio.run(outer()) == (True, True))
+
+    # The approval words never stand in for what was asked.
+    for t in ("go", "sgo", "ship it", "yes go ahead", "Ok, do it!", "lgtm, merge",
+              "build and verify"):
+        _check(f"approval: {t!r}", recap._approval_only(t))
+    for t in ("fix login bug", "go fix the login", "yes but rename the file first",
+              "ship the export button"):
+        _check(f"not approval: {t!r}", not recap._approval_only(t))
     s = "```summary\nCOMMIT: abc1234567 msg\nCHANGELOG:\n- x\nVERSION: v2.0.0\n```"
     _check("status: version", lifecycle.finalize_status(s) == "done: v2.0.0")
     _check("status: commit", lifecycle.finalize_status(s.replace("v2.0.0", "none"))
