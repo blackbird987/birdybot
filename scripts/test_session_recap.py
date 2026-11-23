@@ -83,6 +83,7 @@ class _Messenger:
         self.cards: list[tuple[CardSpec, object, dict]] = []
         self.closed: list[tuple[str, bool]] = []
         self.stripped: list[tuple[str, str]] = []
+        self.edited: list[tuple[str, object, object]] = []
         self.deleted: list[str] = []
         self._owner = owner
         self._next = 500
@@ -112,6 +113,9 @@ class _Messenger:
 
     async def strip_button_rows(self, _cid, msg_id, prefix):  # noqa: ANN001
         self.stripped.append((str(msg_id), prefix))
+
+    async def edit_text(self, _cid, msg_id, text, buttons=None, **_kw):  # noqa: ANN001
+        self.edited.append((str(msg_id), text, buttons))
 
     async def delete_message(self, _cid, msg_id):  # noqa: ANN001
         self.deleted.append(str(msg_id))
@@ -743,19 +747,26 @@ def case_post_and_gate(tmp: Path) -> None:
         choices.open_offer = orig_offer
 
     # Held: never closes even with close=True, and a branch tap resolves it.
+    held_inst = _inst("t-3", branch="claude-bot/t-3")
+    store.update_instance(held_inst)
     m = _Messenger()
     ctx = _ctx(store, m, cid="chan-3")
-    mid = asyncio.run(recap.post(ctx, _draft(final=final, rec=clean),
-                                 recap.EndState(kind="held", branch_instance_id="t-1"), close=False))
+    mid = asyncio.run(recap.post(ctx, _draft(final=held_inst, rec=clean),
+                                 recap.EndState(kind="held", branch_instance_id="t-3"), close=False))
     _check("held: pings", m.cards[0][2]["mention"] == "owner-1")
     _check("held: card found by id", recap.card_record(store, "chan-3", mid) is not None
            and recap.card_record(store, "chan-3", "other") is None)
     new_id = asyncio.run(recap.move_branch_action_off_card(ctx, mid, "Merging..."))
     _check("held: progress off the card", new_id and new_id != mid
            and (mid, "merge:") in m.stripped, (new_id, m.stripped))
+    # The gate reads the branch from its instance, so a merge that left the
+    # branch in place (a failure) resolves nothing.
     asyncio.run(recap.branch_resolved(ctx))
-    _check("held: resolved closes", store.get_recap("chan-3")["held"] is False
-           and m.closed == [("chan-3", True)], m.closed)
+    _check("held: branch still there, still open", m.closed == [], m.closed)
+    held_inst.branch = None            # the merge cleared it
+    store.update_instance(held_inst)
+    asyncio.run(recap.branch_resolved(ctx))
+    _check("held: resolved closes", m.closed == [("chan-3", True)], m.closed)
 
     # A held branch keeps the thread open while the branch exists, whoever
     # releases it: the gate reads the branch instance, not the record alone.
@@ -763,8 +774,9 @@ def case_post_and_gate(tmp: Path) -> None:
     store.update_instance(branch_inst)
     m = _Messenger()
     ctx = _ctx(store, m, cid="chan-4")
-    asyncio.run(recap.post(ctx, _draft(final=branch_inst, rec=clean),
-                           recap.EndState(kind="held", branch_instance_id="t-7"), close=True))
+    mid4 = asyncio.run(recap.post(ctx, _draft(final=branch_inst, rec=clean),
+                                  recap.EndState(kind="held", branch_instance_id="t-7"),
+                                  close=True))
     _check("held gate: post with close=True stays open", m.closed == [], m.closed)
     _check("held gate: record names the branch",
            store.get_recap("chan-4")["branch_instance_id"] == "t-7", store.get_recap("chan-4"))
@@ -774,12 +786,26 @@ def case_post_and_gate(tmp: Path) -> None:
     # A newer card in the same thread replaces the record but carries the
     # waiting branch forward, so it cannot close the thread past it.
     m2 = _Messenger()
-    asyncio.run(recap.post(_ctx(store, m2, cid="chan-4"), _draft(final=final, rec=clean),
-                           recap.EndState(kind="merged"), close=True))
+    m2._next = 700
+    mid4b = asyncio.run(recap.post(_ctx(store, m2, cid="chan-4"), _draft(final=final, rec=clean),
+                                   recap.EndState(kind="merged"), close=True))
     rec4 = store.get_recap("chan-4")
     _check("held carry: a newer card keeps the branch's hold", m2.closed == []
            and rec4["held"] is True and rec4["branch_instance_id"] == "t-7"
            and rec4["instance_id"] == "t-1", (m2.closed, rec4))
+    carry_card, carry_rows, _ = m2.cards[0]
+    notes = dict(carry_card.fields).get("Notes", "")
+    _check("held carry: the newer card says so and can be closed",
+           recap.CARRIED_HOLD_NOTE in notes and carry_card.color == "gold"
+           and [f"{recap.CLOSE_ACTION}:t-1"] in _ids(carry_rows)
+           and not any(i.startswith("merge:") for r in _ids(carry_rows) for i in r),
+           (notes, _ids(carry_rows)))
+    _check("held carry: the older card is still a card",
+           recap.card_record(store, "chan-4", mid4) is not None
+           and recap.card_record(store, "chan-4", mid4b) is not None
+           and rec4["cards"] == [mid4], rec4.get("cards"))
+    _check("held carry: the older card's Close comes off",
+           (mid4, f"{recap.CLOSE_ACTION}:") in m2.stripped, m2.stripped)
     branch_inst.branch = None          # a typed /merge or fleet ship
     store.update_instance(branch_inst)
     closed = asyncio.run(recap.close_thread(store, m, "chan-4", skip_mention=True))
@@ -908,6 +934,30 @@ def case_wiring() -> None:
            cr.index('kind="merge_stopped"') < cr.index('"merge_stopped",'))
     cb = inspect.getsource(callbacks.handle_callback)
     _check("callbacks: Close wired", "recap.CLOSE_ACTION" in cb)
+    _check("send_result: marks a card left out",
+           "inst.card_left_out = True" in inspect.getsource(lifecycle.send_result))
+
+
+def case_branch_finish(tmp: Path) -> None:
+    """A merge resolved from a card never puts buttons on a status line."""
+    from bot.engine import branch_actions
+    store = _store(tmp / "bf")
+    for left_out in (True, False):
+        inst = _inst("t-bf", origin=InstanceOrigin.RELEASE, branch=None,
+                     card_left_out=left_out,
+                     message_ids={"discord": ["status-1"]})
+        store.update_instance(inst)
+        m = _Messenger()
+        asyncio.run(branch_actions._finish_branch_action(
+            _ctx(store, m, cid="chan-bf"), inst, "Merged", "prog-1",
+            keep_open=True, on_card=True))
+        touched = [e[0] for e in m.edited]
+        if left_out:
+            _check("branch finish: left-out card, status line untouched",
+                   touched == ["prog-1"] and m.edited[0][2] is None, m.edited)
+        else:
+            _check("branch finish: a posted result card loses its branch buttons",
+                   touched == ["prog-1", "status-1"], m.edited)
 
 
 def main() -> int:
@@ -926,6 +976,7 @@ def main() -> int:
             case_post_and_gate(tmp)
             case_needs_you(tmp)
             case_wiring()
+            case_branch_finish(tmp)
         finally:
             config.DATA_DIR = orig
     print(f"{PASSES} passed, {len(FAILS)} failed")

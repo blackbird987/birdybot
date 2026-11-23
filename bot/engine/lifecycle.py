@@ -1539,6 +1539,7 @@ async def send_result(
                 # The end card (bot/engine/recap.py) carries the changelog,
                 # version and run facts this card would repeat.
                 log.info("send_result: %s card left to the end card", inst.id)
+                inst.card_left_out = True
                 ctx.store.update_instance(inst)
                 return None
 

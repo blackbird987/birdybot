@@ -245,6 +245,7 @@ def full_instance() -> Instance:
         jsonl_uuid_by_msg_id={"111": "uuid-1", "222": "uuid-2"},
         expand_msg_ids=["333", "444"],
         result_collapsed=True,
+        card_left_out=True,
         is_owner_session=False,
         vault_eligible=True,
         guest_confined=True,

@@ -100,7 +100,9 @@ Code: `bot/engine/recap.py`. Prompt: `config.RECAP_PROMPT` (with
   (/retry, a cooldown or pay-per-use retry) runs outside that context and
   keeps its own result card and Merge/Discard buttons, because nothing will
   post a card after it. A Done or release that asks a question is never
-  suppressed, and nothing is closed on it.
+  suppressed, and nothing is closed on it. A suppressed turn is marked
+  (`Instance.card_left_out`): its last message is then its status line, and
+  resolving its branch must not hang buttons on that line.
 - **Next buttons send the full instruction.** The label is short; a tap sends
   `PICK_UP_PREFIX + label + ". " + message` (`choices.open_offer(messages=)`,
   `choices.tap_text`) through `on_text` like typed text. "Do all" (two or more
@@ -111,15 +113,26 @@ Code: `bot/engine/recap.py`. Prompt: `config.RECAP_PROMPT` (with
   the branch instance. Tapping one strips that row and moves the progress and
   outcome into a message of their own, so the card stays readable;
   `branch_resolved` then lets the gate close the thread if nothing else is
-  open, unless the merge landed on a tree that must not ship.
+  open, unless the merge landed on a tree that must not ship. It writes
+  nothing: the gate reads the branch from its instance, and a merge or
+  discard clears every build stacked on that branch.
 - **The record is per thread and small.** `recaps` in state.json holds one
   record per channel (message id, time, repo, headline, open items, held,
-  instance id, branch instance id). A newer card replaces it, but carries a
-  branch an earlier card still holds, so the newer card cannot close the
-  thread past it. Records older than 30 days are pruned on the next write.
+  instance id, branch instance id, and the ids of the thread's last ten
+  earlier cards). A newer card replaces it, but carries a branch an earlier
+  card still holds, so the newer card cannot close the thread past it: it
+  says so in its Notes and gets a Close, while the branch row stays on the
+  earlier card. That earlier card is still a card (`card_record` matches its
+  id), so a tap on its branch row gets the card's handling. A card holding a
+  branch of its own does not carry an earlier one: builds in one thread
+  stack on one branch, so it is the same branch.
+  Records older than 30 days are pruned on the next write.
   That is also how long the gate holds: Needs you stops listing a thread once
   someone writes in it, but the gate keeps refusing until a newer card, Close
   or the prune.
+- **One Close per thread.** A newer card takes the Close row off the card
+  before it, so the only Close is on the newest card, whose record it
+  empties. Close acts on the thread, not on one card.
 - **Close empties the record, it does not drop it.** The open items and the
   hold are cleared and the thread is archived, but the card is still known as
   the card: Close takes only its own row off (it sits alone for that reason,

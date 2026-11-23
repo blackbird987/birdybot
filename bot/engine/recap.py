@@ -66,6 +66,10 @@ OWNER_MSG_CHARS = 280
 OWNER_MSGS_MAX = 4
 DO_ALL_LABEL = "Do all"
 CLOSE_ACTION = "recap_close"
+CARDS_KEPT = 10         # earlier card ids a record remembers for branch-row taps
+# Notes line on a card that keeps the thread open for an earlier card's branch.
+CARRIED_HOLD_NOTE = ("An earlier branch in this thread still waits for Merge "
+                     "or Discard on its card above")
 IMAGE_DIR_NAME = "recap_images"
 IMAGE_KEEP_S = 7 * 86400   # kept pictures older than this are deleted
 # What a Next button sends. A label alone ("Fix the flaky test") reads as a
@@ -132,10 +136,12 @@ REPLACED_ORIGINS = frozenset({InstanceOrigin.DONE, InstanceOrigin.RELEASE})
 
 
 def card_replaced(inst: Instance) -> bool:
-    """A finished turn of a kind whose result card an end card replaces.
+    """A finished Done or release turn: a turn whose result card is left to
+    the end card when a caller posts one (``lifecycle._end_card_follows``).
 
-    For a turn the end card is about (its branch instance), the result card
-    was left out and the turn's last message is its status line.
+    Whether it actually was left out is on the instance (``card_left_out``):
+    a retry runs with no card following, and a reply with no summary block
+    keeps its card.
     """
     return (inst.origin in REPLACED_ORIGINS and not inst.needs_input
             and inst.status == InstanceStatus.COMPLETED)
@@ -676,6 +682,8 @@ class Card:
     open_items: list[str]
     next_items: list[NextItem]
     held: bool
+    # An earlier card's branch still waits in this thread (``post``).
+    carries_hold: bool = False
 
 
 def split_merge_notes(notes: list[str]) -> tuple[list[str], list[str]]:
@@ -740,8 +748,13 @@ def _elapsed(facts: Facts, now: float) -> str | None:
     return format_elapsed(max(0.0, now - facts.started_at))
 
 
-def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Card:
-    """The card for one ending. Pure: no I/O, so the harness can pin it."""
+def build_card(draft: Draft, state: EndState, *, now: float | None = None,
+               carries_hold: bool = False) -> Card:
+    """The card for one ending. Pure: no I/O, so the harness can pin it.
+
+    ``carries_hold``: an earlier card's branch in this thread still waits
+    for Merge or Discard, so this card keeps the thread open too and says so.
+    """
     now = time.time() if now is None else now
     facts, rec = draft.facts, draft.recap or Recap()
 
@@ -807,10 +820,12 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
     if facts.leftovers:
         extra.append(f"{facts.leftovers} review leftover"
                      f"{'s' if facts.leftovers != 1 else ''} filed in TODO.md")
+    if carries_hold:
+        extra.append(CARRIED_HOLD_NOTE)
     if extra:
         fields.append(("Notes", _bullets(extra)))
 
-    if state.kind in _TROUBLE_KINDS or open_items or held:
+    if state.kind in _TROUBLE_KINDS or open_items or held or carries_hold:
         color = "gold"
     elif state.kind == "merged" or facts.commit:
         color = "green"
@@ -829,7 +844,8 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
     spec = CardSpec(title=title, description=description,
                     fields=fields, color=color, footer=footer,
                     image_path=draft.image_path)
-    return Card(spec=spec, open_items=open_items, next_items=next_items, held=held)
+    return Card(spec=spec, open_items=open_items, next_items=next_items, held=held,
+                carries_hold=carries_hold)
 
 
 def pick_up_messages(items: list[NextItem]) -> tuple[list[str], list[str]]:
@@ -848,7 +864,8 @@ def card_buttons(card: Card, iid: str, state: EndState) -> list[list[ButtonSpec]
 
     Close and the branch each sit on a row of their own because a tap takes
     its row off the card whole (``strip_button_rows``): sharing one would
-    take Missed, or the branch's other buttons, along with it.
+    take Missed, or the branch's other buttons, along with it. A carried
+    hold gets Close but no branch row: that row stays on the earlier card.
     """
     from bot.platform.buttons import choice_row_specs
     rows: list[list[ButtonSpec]] = []
@@ -860,7 +877,7 @@ def card_buttons(card: Card, iid: str, state: EndState) -> list[list[ButtonSpec]
         rows.append([ButtonSpec("Merge", f"merge:{bid}"),
                      ButtonSpec("Discard", f"discard:{bid}"),
                      ButtonSpec("Diff", f"diff:{bid}")])
-    if card.open_items or card.held:
+    if card.open_items or card.held or card.carries_hold:
         rows.append([ButtonSpec("Close", f"{CLOSE_ACTION}:{iid}")])
     rows.append([ButtonSpec("Missed", f"missed:{iid}")])
     return rows
@@ -881,8 +898,16 @@ async def post(
     """
     if draft is None:
         return None
+    prev = _record(ctx.store, ctx.channel_id)
+    # An earlier card's branch is still waiting for Merge or Discard: this
+    # card replaces that record, so it carries the hold forward and the gate
+    # keeps the thread open until that branch is resolved. A card holding a
+    # branch of its own holds the same one: builds in a thread stack on it.
+    carried = None
+    if state.kind != "held" and _holds_branch(ctx.store, prev):
+        carried = prev.get("branch_instance_id") or prev.get("instance_id")
     try:
-        card = build_card(draft, state)
+        card = build_card(draft, state, carries_hold=carried is not None)
     except Exception:
         log.exception("End card: could not build the card for %s", draft.final.id)
         return None
@@ -904,13 +929,8 @@ async def post(
         except Exception:
             log.warning("End card: the Next offer for %s was not recorded", iid,
                         exc_info=True)
-    branch_id = (state.branch_instance_id or iid) if card.held else None
-    prev = _record(ctx.store, ctx.channel_id)
-    if branch_id is None and _holds_branch(ctx.store, prev):
-        # An earlier card's branch is still waiting for Merge or Discard:
-        # this card replaces that record, so it carries the hold forward and
-        # the gate keeps the thread open until that branch is resolved.
-        branch_id = prev.get("branch_instance_id") or prev.get("instance_id")
+    branch_id = (state.branch_instance_id or iid) if card.held else carried
+    prev_msg = str(prev.get("msg_id") or "") if prev else ""
     record = {
         "msg_id": str(msg_id),
         "posted_at": time.time(),
@@ -920,6 +940,9 @@ async def post(
         "held": branch_id is not None,
         "instance_id": iid,
         "branch_instance_id": branch_id,
+        # The thread's earlier cards: a branch row left on one of them is
+        # still a card tap (``card_record``).
+        "cards": _earlier_cards(prev, str(msg_id)),
     }
     recorded = True
     try:
@@ -931,6 +954,10 @@ async def post(
     _notify_waiting()
     log.info("End card posted in %s for %s (%s, %d open)", ctx.channel_id, iid,
              state.kind, len(card.open_items))
+    if recorded and prev_msg and prev_msg != str(msg_id):
+        # The newest card owns the thread's Close: an older one's would
+        # empty this card's items while the owner was reading the old ones.
+        await _strip(ctx, prev_msg, f"{CLOSE_ACTION}:")
     # An unrecorded card leaves the gate reading an older record, so only a
     # recorded one may close the thread.
     if close and recorded:
@@ -1038,12 +1065,28 @@ async def close_thread(store, messenger, channel_id: str | None, *,
     return True
 
 
+def _earlier_cards(prev: dict | None, msg_id: str) -> list[str]:
+    """The message ids of the thread's cards before ``msg_id``, newest last."""
+    if not prev:
+        return []
+    ids = [str(m) for m in (prev.get("cards") or []) if m]
+    if prev.get("msg_id"):
+        ids.append(str(prev["msg_id"]))
+    out = [m for m in dict.fromkeys(ids) if m != msg_id]
+    return out[-CARDS_KEPT:]
+
+
 def card_record(store, channel_id: str | None, msg_id: str | None) -> dict | None:
-    """The end card's record when ``msg_id`` is that card, else None."""
+    """The thread's end card record when ``msg_id`` is one of its end cards
+    (the newest, or an earlier one that may still carry a branch row), else
+    None."""
     rec = _record(store, channel_id)
-    if not rec or not msg_id or str(rec.get("msg_id")) != str(msg_id):
+    if not rec or not msg_id:
         return None
-    return rec
+    mid = str(msg_id)
+    if str(rec.get("msg_id")) == mid or mid in {str(m) for m in rec.get("cards") or []}:
+        return rec
+    return None
 
 
 async def _strip(ctx, msg_id: str | None, prefix: str) -> None:
@@ -1075,26 +1118,24 @@ async def move_branch_action_off_card(ctx, msg_id: str, progress: str) -> str | 
 
 
 async def branch_resolved(ctx, *, keep_open: bool = False) -> None:
-    """The card's held branch was merged or discarded: it is no longer held,
-    and the thread closes when nothing else on the card is open."""
-    rec = _record(ctx.store, ctx.channel_id)
-    if rec:
-        rec = dict(rec)
-        rec["held"] = False
-        try:
-            ctx.store.put_recap(ctx.channel_id, rec)
-        except Exception:
-            log.warning("End card: could not update the record in %s",
-                        ctx.channel_id, exc_info=True)
+    """A card's branch was merged or discarded: the thread closes when nothing
+    else is open.
+
+    The record is not written: the gate reads the held branch from its
+    instance (``_holds_branch``), whose branch the merge or discard cleared
+    along with every build stacked on it. A flag cleared here could drop a
+    different branch the newest card still holds.
+    """
     _notify_waiting()
     if not keep_open:
         await close_thread(ctx.store, ctx.messenger, ctx.channel_id, skip_mention=True)
 
 
 async def on_close_tap(ctx, instance_id: str, source_msg_id: str | None) -> None:
-    """Close: the owner says the open items can wait. Clears the card's open
-    items, closes its Next offer, takes the Close row off, then archives the
-    thread past the gate.
+    """Close: the owner says what is open can wait. Acts on the thread, not
+    one card (the newest card owns the only Close, ``post``): clears the
+    record's open items and hold, closes the Next offer, takes the Close row
+    off, then archives the thread past the gate.
 
     The record stays, emptied, so the card is still known as the card: its
     held branch keeps its Merge, Discard and Diff row, and a later tap on it

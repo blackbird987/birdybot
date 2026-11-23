@@ -291,10 +291,11 @@ async def _finish_branch_action(
     on the card when the branch survived: a failed merge's banner names Try
     Merge Again and Resolve, and the progress line took the old buttons away.
 
-    `on_card`: tapped on the end card, so `source_msg_id` is the outcome's own
+    `on_card`: tapped on an end card, so `source_msg_id` is the outcome's own
     line, not the result card. That line gets no buttons of the instance's
-    (the end card still has them), and an instance whose result card the end
-    card replaced has only a status line to strip, which must not gain any.
+    (the end card still has them). An instance whose result card was left to
+    the end card (`card_left_out`) has only a status line to strip, which
+    must not gain any.
     """
     from bot.engine import recap
     if on_card:
@@ -309,7 +310,7 @@ async def _finish_branch_action(
     else:
         await ctx.messenger.send_text(ctx.channel_id, escaped)
     # Also strip buttons from the result embed if it's a different message
-    if not inst.branch and not (on_card and recap.card_replaced(inst)):
+    if not inst.branch and not inst.card_left_out:
         await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
     # Close thread if this was a post-Done merge/discard (branch resolved)
     if inst.origin == InstanceOrigin.DONE and not inst.branch and not keep_open:
