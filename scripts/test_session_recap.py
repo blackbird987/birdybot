@@ -273,10 +273,23 @@ def case_cards() -> None:
     _check("held: status", c.spec.description.startswith("v1.2.3 built, waiting for your merge"),
            c.spec.description)
     _check("held: reason", "Held: it touches the release lock" in c.spec.description)
+    _check("held: reason on its own line", "\nHeld: " in c.spec.description,
+           c.spec.description)
     _check("held: gold", c.spec.color == "gold")
     rows = recap.card_buttons(c, "t-1", recap.EndState(kind="held", branch_instance_id="t-9"))
     _check("held: rows", _ids(rows) == [["merge:t-9", "discard:t-9", "diff:t-9"],
                                        ["recap_close:t-1", "missed:t-1"]], _ids(rows))
+
+    # A merge that went wrong: gold, and the status says what happened.
+    sf = recap.Facts(repo="bot", version="v1.2.3", branch="b", target="master")
+    c = recap.build_card(_draft(sf, clean), recap.EndState(kind="merge_stopped"))
+    _check("stopped: status", c.spec.description.startswith(
+        "Merged into master, stopped before deploy"), c.spec.description)
+    _check("stopped: gold", c.spec.color == "gold", c.spec.color)
+    c = recap.build_card(_draft(sf, clean), recap.EndState(kind="merge_failed"))
+    _check("failed: status", c.spec.description.startswith("The merge did not land"),
+           c.spec.description)
+    _check("failed: gold", c.spec.color == "gold", c.spec.color)
 
     # Verify preset: held, no release.
     vf = recap.Facts(repo="bot", branch="b", target="master")
@@ -615,6 +628,40 @@ def case_post_and_gate(tmp: Path) -> None:
     _check("held: resolved closes", store.get_recap("chan-3")["held"] is False
            and m.closed == [("chan-3", True)], m.closed)
 
+    # A held branch keeps the thread open while the branch exists, whoever
+    # releases it: the gate reads the branch instance, not the record alone.
+    branch_inst = _inst("t-7", branch="claude-bot/t-7")
+    store.update_instance(branch_inst)
+    m = _Messenger()
+    ctx = _ctx(store, m, cid="chan-4")
+    asyncio.run(recap.post(ctx, _draft(final=branch_inst, rec=clean),
+                           recap.EndState(kind="held", branch_instance_id="t-7"), close=True))
+    _check("held gate: post with close=True stays open", m.closed == [], m.closed)
+    _check("held gate: record names the branch",
+           store.get_recap("chan-4")["branch_instance_id"] == "t-7", store.get_recap("chan-4"))
+    closed = asyncio.run(recap.close_thread(store, m, "chan-4", skip_mention=True))
+    _check("held gate: refuses while the branch exists", closed is False and m.closed == [],
+           m.closed)
+    branch_inst.branch = None          # a typed /merge or fleet ship
+    store.update_instance(branch_inst)
+    closed = asyncio.run(recap.close_thread(store, m, "chan-4", skip_mention=True))
+    _check("held gate: closes once the branch is gone", closed is True
+           and m.closed == [("chan-4", True)], m.closed)
+    store.put_recap("chan-5", {"msg_id": "5", "posted_at": time.time(), "open_items": [],
+                               "held": True, "instance_id": "gone", "branch_instance_id": "gone"})
+    closed = asyncio.run(recap.close_thread(store, _Messenger(), "chan-5"))
+    _check("held gate: a pruned instance holds nothing", closed is True)
+
+    # A merge that went wrong never pings from the card, open items or not:
+    # the banner or warning beside it pings.
+    for kind in ("merge_failed", "merge_stopped"):
+        m = _Messenger()
+        asyncio.run(recap.post(_ctx(store, m, cid="chan-6"), _draft(final=final, rec=rec_full),
+                               recap.EndState(kind=kind), close=False, loud=True))
+        _check(f"{kind}: card silent", m.cards[0][2] == {"silent": True, "mention": None},
+               m.cards[0][2])
+        _check(f"{kind}: not closed", m.closed == [], m.closed)
+
     # The record survives a reload, and month-old ones are pruned.
     store.put_recap("old", {"posted_at": time.time() - 40 * 86400, "open_items": ["x"]})
     store.put_recap("chan-9", {"posted_at": time.time(), "open_items": ["a"], "msg_id": "9"})
@@ -685,6 +732,9 @@ def case_wiring() -> None:
     od = inspect.getsource(steps.on_done)
     _check("done: card prepared before the merge", od.index("recap.prepare(") < od.index("_finalize_merge("))
     _check("done: no close on a question", "if result.needs_input:" in od)
+    _check("done: a stopped merge gets its card", 'kind="merge_stopped"' in od)
+    _check("chain: a stopped merge gets its card",
+           cr.index('kind="merge_stopped"') < cr.index('"merge_stopped",'))
     cb = inspect.getsource(callbacks.handle_callback)
     _check("callbacks: Close wired", "recap.CLOSE_ACTION" in cb)
 

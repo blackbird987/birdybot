@@ -703,7 +703,11 @@ async def on_done(
         elif outcome is MergeOutcome.MERGED:
             await recap.post(ctx, draft, recap.EndState(
                 kind="merged", merge_notes=report), close=True)
-        # STOPPED: _finalize_merge posted the warning and closes nothing.
+        else:
+            # STOPPED: _finalize_merge posted the warning (it pings) and
+            # skipped deploy; the card follows it and the thread stays open.
+            await recap.post(ctx, draft, recap.EndState(kind="merge_stopped"),
+                             close=False)
         return result
 
     # No branch to merge: the card, then the close (refused while open).

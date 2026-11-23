@@ -105,9 +105,14 @@ class Recap:
     image: str | None = None
 
 
+def _cut(text: str, n: int) -> str:
+    """At most ``n`` characters, line breaks kept, an ellipsis on a cut."""
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
 def _clip(text: str, n: int) -> str:
-    s = " ".join((text or "").split())
-    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+    """One line of at most ``n`` characters: whitespace runs become a space."""
+    return _cut(" ".join((text or "").split()), n)
 
 
 def _is_none(text: str) -> bool:
@@ -527,12 +532,20 @@ class EndState:
     """How the work ended, which only the caller knows.
 
     ``kind``: ``merged``, ``held`` (a branch waiting for the owner),
-    ``merge_failed``, or ``local`` (no branch: committed in place or nothing).
+    ``merge_failed``, ``merge_stopped`` (it landed on a tree that must not
+    ship, so deploy and close were skipped), or ``local`` (no branch:
+    committed in place or nothing).
     """
     kind: str = "local"
     merge_notes: list[str] = field(default_factory=list)
     decided_note: str = ""
     branch_instance_id: str | None = None
+
+
+# Endings where the merge went wrong. Every caller follows the card with a
+# message that pings on its own (the conflict banner, the stop warning, the
+# chain's exit mention), so the card itself stays silent: one event, one ping.
+_TROUBLE_KINDS = frozenset({"merge_failed", "merge_stopped"})
 
 
 @dataclass
@@ -570,11 +583,7 @@ def split_merge_notes(notes: list[str]) -> tuple[list[str], list[str]]:
 
 
 def _bullets(items: list[str]) -> str:
-    return _clip_field("\n".join(f"• {i}" for i in items if i))
-
-
-def _clip_field(text: str) -> str:
-    return text if len(text) <= FIELD_CHARS else text[: FIELD_CHARS - 1].rstrip() + "…"
+    return _cut("\n".join(f"• {i}" for i in items if i), FIELD_CHARS)
 
 
 EMBED_BUDGET = 5800     # Discord rejects an embed over 6000 characters in total
@@ -623,6 +632,9 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
                   else "Built on its branch, waiting for your merge")
     elif state.kind == "merge_failed":
         status = "The merge did not land: see the message below"
+    elif state.kind == "merge_stopped":
+        status = (f"Merged into {facts.target or 'the main branch'}, stopped "
+                  f"before deploy: see the warning above")
     elif ver:
         status = f"Released {ver}"
     elif facts.commit:
@@ -654,7 +666,7 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
 
     fields: list[tuple[str, str]] = []
     if asked:
-        fields.append(("You asked", _clip_field(redact_secrets(asked))))
+        fields.append(("You asked", _cut(redact_secrets(asked), FIELD_CHARS)))
     if rec.before:
         fields.append(("Before", _bullets([redact_secrets(b) for b in rec.before])))
     if now_lines:
@@ -662,8 +674,9 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
     if for_you:
         fields.append(("For you", _bullets(for_you)))
     if next_items:
-        fields.append(("Next", _clip_field("\n".join(
-            f"{i}. **{n.label}**: {n.message}" for i, n in enumerate(next_items, 1)))))
+        fields.append(("Next", _cut("\n".join(
+            f"{i}. **{n.label}**: {n.message}" for i, n in enumerate(next_items, 1)),
+            FIELD_CHARS)))
     extra = list(notes)
     if state.decided_note:
         extra.append(state.decided_note)
@@ -673,7 +686,7 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
     if extra:
         fields.append(("Notes", _bullets(extra)))
 
-    if state.kind == "merge_failed" or open_items or held:
+    if state.kind in _TROUBLE_KINDS or open_items or held:
         color = "gold"
     elif state.kind == "merged" or facts.commit:
         color = "green"
@@ -686,7 +699,8 @@ def build_card(draft: Draft, state: EndState, *, now: float | None = None) -> Ca
                    facts.commit]
     footer = " · ".join(b for b in footer_bits if b)
     title = _clip(redact_secrets(title), 256)
-    description = _clip(description, 4000)
+    # _cut, not _clip: the "Held:" line must stay on its own line.
+    description = _cut(description, 4000)
     fields = _fit_embed(title, description, footer, fields)
     spec = CardSpec(title=title, description=description,
                     fields=fields, color=color, footer=footer,
@@ -734,8 +748,9 @@ async def post(
     """Post the end card, record it, and close the thread when nothing is open.
 
     ``loud`` pings even when nothing is open (Autopilot's completion ping).
-    Open items or a held branch always ping. Never raises; returns the card's
-    message id.
+    Open items or a held branch ping too, except on a merge that went wrong,
+    whose own warning pings (``_TROUBLE_KINDS``). Never raises; returns the
+    card's message id.
     """
     if draft is None:
         return None
@@ -746,7 +761,8 @@ async def post(
         return None
     iid = draft.final.id
     buttons = card_buttons(card, iid, state)
-    mention = ctx.user_id if (loud or card.open_items or card.held) else None
+    pings = (loud or card.open_items or card.held) and state.kind not in _TROUBLE_KINDS
+    mention = ctx.user_id if pings else None
     msg_id: str | None = None
     try:
         send_card = getattr(ctx.messenger, "send_card", None)
@@ -772,6 +788,7 @@ async def post(
         "open_items": card.open_items,
         "held": card.held,
         "instance_id": iid,
+        "branch_instance_id": state.branch_instance_id if card.held else None,
     }
     try:
         ctx.store.put_recap(ctx.channel_id, record)
@@ -787,33 +804,64 @@ async def post(
     return str(msg_id) if msg_id else None
 
 
-def open_items_for(store, channel_id: str | None) -> list[str]:
-    """The thread's end card's open items; empty when it has none or no card."""
+def _record(store, channel_id: str | None) -> dict | None:
+    """The thread's end card record, or None. Never raises."""
     if not channel_id:
-        return []
+        return None
     get = getattr(store, "get_recap", None)
     if get is None:
-        return []
+        return None
     try:
-        rec = get(str(channel_id)) or {}
+        rec = get(str(channel_id))
     except Exception:
-        return []
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def open_items_for(store, channel_id: str | None) -> list[str]:
+    """The thread's end card's open items; empty when it has none or no card."""
+    rec = _record(store, channel_id) or {}
     return [str(x) for x in (rec.get("open_items") or []) if str(x).strip()]
+
+
+def _holds_branch(store, rec: dict | None) -> bool:
+    """The card's held branch is still waiting for Merge or Discard.
+
+    Read from the instance, not the record alone: a branch merged or
+    discarded some other way (a typed /merge, fleet ship) clears
+    ``instance.branch`` without touching the card. A gone instance holds
+    nothing.
+    """
+    if not rec or not rec.get("held"):
+        return False
+    bid = rec.get("branch_instance_id") or rec.get("instance_id")
+    if not bid:
+        return False
+    try:
+        inst = store.get_instance(str(bid))
+    except Exception:
+        return False
+    return bool(inst is not None and getattr(inst, "branch", None))
 
 
 async def close_thread(store, messenger, channel_id: str | None, *,
                        skip_mention: bool = False) -> bool:
-    """The one door for a bot-initiated close. Refuses while anything is open.
+    """The one door for a bot-initiated close. Refuses while anything is open:
+    an open item on the end card, or a held branch still waiting.
 
     Returns True when the close was asked for. The card's Close button does
     not come through here: it is the owner overriding exactly this.
     """
     if not channel_id:
         return False
+    rec = _record(store, channel_id)
     items = open_items_for(store, channel_id)
     if items:
         log.info("Not closing %s: its end card has %d open item(s)", channel_id,
                  len(items))
+        return False
+    if _holds_branch(store, rec):
+        log.info("Not closing %s: its end card's branch is still held", channel_id)
         return False
     try:
         await messenger.close_conversation(channel_id, skip_mention=skip_mention)
@@ -825,30 +873,28 @@ async def close_thread(store, messenger, channel_id: str | None, *,
 
 def card_record(store, channel_id: str | None, msg_id: str | None) -> dict | None:
     """The end card's record when ``msg_id`` is that card, else None."""
-    if not channel_id or not msg_id:
-        return None
-    get = getattr(store, "get_recap", None)
-    if get is None:
-        return None
-    try:
-        rec = get(str(channel_id))
-    except Exception:
-        return None
-    if not rec or str(rec.get("msg_id")) != str(msg_id):
+    rec = _record(store, channel_id)
+    if not rec or not msg_id or str(rec.get("msg_id")) != str(msg_id):
         return None
     return rec
+
+
+async def _strip(ctx, msg_id: str | None, prefix: str) -> None:
+    """Take the button rows starting with ``prefix`` off a message. Best effort."""
+    strip = getattr(ctx.messenger, "strip_button_rows", None)
+    if not msg_id or strip is None:
+        return
+    try:
+        await strip(ctx.channel_id, msg_id, prefix)
+    except Exception:
+        log.debug("Could not strip %s rows from %s", prefix, msg_id, exc_info=True)
 
 
 async def move_branch_action_off_card(ctx, msg_id: str, progress: str) -> str | None:
     """A Merge or Discard tapped on the card: take that row off the card
     (its other rows stay, it is never redrawn from specs) and post the
     progress line as its own message, which the outcome then replaces."""
-    strip = getattr(ctx.messenger, "strip_button_rows", None)
-    if strip is not None:
-        try:
-            await strip(ctx.channel_id, msg_id, "merge:")
-        except Exception:
-            log.debug("Could not strip the branch row from the card", exc_info=True)
+    await _strip(ctx, msg_id, "merge:")
     try:
         return await ctx.messenger.send_text(ctx.channel_id, progress, silent=True)
     except Exception:
@@ -858,12 +904,15 @@ async def move_branch_action_off_card(ctx, msg_id: str, progress: str) -> str | 
 async def branch_resolved(ctx, *, keep_open: bool = False) -> None:
     """The card's held branch was merged or discarded: it is no longer held,
     and the thread closes when nothing else on the card is open."""
-    get = getattr(ctx.store, "get_recap", None)
-    rec = get(ctx.channel_id) if get else None
+    rec = _record(ctx.store, ctx.channel_id)
     if rec:
         rec = dict(rec)
         rec["held"] = False
-        ctx.store.put_recap(ctx.channel_id, rec)
+        try:
+            ctx.store.put_recap(ctx.channel_id, rec)
+        except Exception:
+            log.warning("End card: could not update the record in %s",
+                        ctx.channel_id, exc_info=True)
     if not keep_open:
         await close_thread(ctx.store, ctx.messenger, ctx.channel_id, skip_mention=True)
 
@@ -877,13 +926,8 @@ async def on_close_tap(ctx, instance_id: str, source_msg_id: str | None) -> None
         log.debug("No end card record to drop in %s", ctx.channel_id, exc_info=True)
     from bot.engine.directives import choices
     await choices.close_offer(ctx, ctx.channel_id, "closed")
-    strip = getattr(ctx.messenger, "strip_button_rows", None)
-    if source_msg_id and strip is not None:
-        for prefix in (f"{CLOSE_ACTION}:", "merge:"):
-            try:
-                await strip(ctx.channel_id, source_msg_id, prefix)
-            except Exception:
-                log.debug("Could not strip %s from the card", prefix, exc_info=True)
+    for prefix in (f"{CLOSE_ACTION}:", "merge:"):
+        await _strip(ctx, source_msg_id, prefix)
     from bot.engine import waiting
     waiting.notify_changed()
     try:

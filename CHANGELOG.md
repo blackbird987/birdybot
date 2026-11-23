@@ -3,8 +3,8 @@
 ## [Unreleased]
 
 ### Changed
-- **A session or chain now ends in one card.** The Done and release cards, the step lines, "Couldn't be verified automatically", "not everything asked for was delivered", the merge line and the "Chain complete on branch" message are replaced by one card: a headline, what you asked, how things stood before, how they stand now, what is yours to do, and up to three next steps. The status line (version, merged or waiting, files changed, open count) comes from git and the bot's records; the prose comes from a short read-only turn of the session itself, and the card falls back to the commit and changelog when that turn cannot run. An image the session names is attached. Design: `docs/design/session-recap.md`. Harness: `scripts/test_session_recap.py`.
-- **A thread with anything open is never closed by the bot.** Every automatic close now goes through one gate that refuses while the end card lists something for you or a next step. The card's Close button closes it anyway.
+- **A session or chain now ends in one card.** The Done card, a chain's release card, "Couldn't be verified automatically", "not everything asked for was delivered", the merge line and the "Chain complete on branch" message are replaced by one card: a headline, what you asked, how things stood before, how they stand now, what is yours to do, and up to three next steps. The status line (version, merged or waiting, files changed, open count) comes from git and the bot's records; the prose comes from a short read-only turn of the session itself, and the card falls back to the commit and changelog when that turn cannot run. An image the session names is attached. The Done and release step lines now name the version or commit they made. A merge that fails or stops before deploy still gets its card, next to the banner or warning that pings, and the thread stays open. Design: `docs/design/session-recap.md`. Harness: `scripts/test_session_recap.py`.
+- **A thread with anything open is never closed by the bot.** Every automatic close now goes through one gate that refuses while the end card lists something for you, a next step, or a branch still waiting for your merge. The card's Close button closes it anyway.
 - **The "merged on my own" line and a hold's reason moved onto the end card**, as a note and a "Held:" line.
 
 ### Added
@@ -12,7 +12,7 @@
 - **Open items show in Needs you** until someone writes in that thread, for up to a week.
 
 ### Fixed
-- **A chain whose merge fails still gets its summary**, above the conflict banner, and the thread stays open.
+- **A Done that ends on a question no longer merges and closes the thread under it.** It now waits for the answer like any other question.
 
 ## v0.102.36, Footers outside open code blocks, stable stale-usage age (2026-11-20)
 

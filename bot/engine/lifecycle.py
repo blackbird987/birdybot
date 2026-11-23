@@ -364,6 +364,7 @@ def _end_card_follows(inst: Instance, has_chain: bool) -> bool:
         has_chain and inst.origin == InstanceOrigin.RELEASE
     )
 
+
 # These runs are read by their caller. They do not retry on a timer (a usage limit
 # means it could not check), post no result card, and are not a child landing. The
 # plan check's author run is here too but not above, since it resumes the thread's

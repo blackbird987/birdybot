@@ -194,7 +194,8 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._choice_offers: dict[str, dict] = {}
         # The end card's open items, one record per channel (bot/engine/recap.py
         # owns the rules): {channel_id: {msg_id, posted_at, repo, headline,
-        # open_items, instance_id}}. Its own key for the same reason as the
+        # open_items, held, instance_id, branch_instance_id}}. Its own key for
+        # the same reason as the
         # offers above: it decides whether the thread may close, so it must
         # outlive a restart and an instance prune.
         self._recaps: dict[str, dict] = {}

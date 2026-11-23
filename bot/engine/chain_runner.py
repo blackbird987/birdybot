@@ -1258,7 +1258,10 @@ async def _run_autopilot_chain(
                         # _finalize_merge already skipped deploy and close and
                         # posted the warning. Not a conflict, so no Resolve /
                         # Retry banner, and not a finished chain either, so it
-                        # must not be recorded as merged.
+                        # must not be recorded as merged. The card still lands
+                        # under the warning, quietly: the exit mention pings.
+                        await recap.post(ctx, end_draft, recap.EndState(
+                            kind="merge_stopped"), close=False)
                         completed_steps.append(step)
                         await _exit_chain_needs_input(
                             ctx, source_id, session_id, steps, completed_steps,
