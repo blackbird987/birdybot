@@ -215,6 +215,25 @@ def install_root(script_root: Path) -> Path:
     return root if (root / "bot" / "__main__.py").exists() else script_root
 
 
+def read_dotenv(root: Path) -> dict[str, str]:
+    """The KEY=value pairs in *root*/.env, without importing bot.config.
+
+    Plain parsing only: blank lines and ``#`` comments are skipped and one
+    layer of quotes is stripped. A missing or unreadable file reads as empty.
+    """
+    env: dict[str, str] = {}
+    try:
+        text = (Path(root) / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return env
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip("'\"")
+    return env
+
+
 def install_data_dir(root: Path) -> Path:
     """Where the installed bot keeps its data, without importing bot.config.
 
@@ -224,18 +243,7 @@ def install_data_dir(root: Path) -> Path:
     ``install_root`` so a script run from a build worktree still finds the live
     bot's files rather than the worktree's empty ``data/`` tree.
     """
-    value = os.getenv("DATA_DIR")
-    if not value:
-        env_file = Path(root) / ".env"
-        if env_file.exists():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("DATA_DIR=") and not line.startswith("#"):
-                        value = line.split("=", 1)[1].strip().strip("'\"")
-                        break
-            except OSError:
-                value = None
+    value = os.getenv("DATA_DIR") or read_dotenv(root).get("DATA_DIR")
     if not value:
         return Path(root) / "data"
     p = Path(value)

@@ -4,8 +4,9 @@ Whoever can speak as the owner in the bot's category gets a bypass-mode Claude
 session on this machine. That is the owner's account, and (while test mode is
 armed) the test webhooks. Around them sit the powers that reach those: server
 administrators, anyone who can manage webhooks (they can copy any webhook's
-URL), manage the server or manage roles. This prints all of it, so a change
-shows up in the weekly security check rather than after the fact.
+URL), manage the server or manage roles, server-wide or in one channel. This
+prints all of it, so a change can show up in a routine check rather than after
+the fact.
 
 Usage:
   python scripts/discord_audit.py                  plain-text report
@@ -18,8 +19,9 @@ scripts/test_discord_audit.py asserts that against the source. The bot token is
 read from the installed bot's .env and never printed, and webhook tokens and
 URLs are dropped before anything is reported.
 
-Exit 0 on a report (findings are not failures), 2 when the token is missing or
-Discord cannot be reached.
+Exit 0 on a report (findings are not failures, and a --diff with no earlier
+report says so), 2 when the token is missing, Discord cannot be reached, or the
+earlier report cannot be parsed.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ sys.path.insert(0, str(_SCRIPT_ROOT))
 
 # Not bot.config (side effects, worktree-relative paths): stdlib-only helpers.
 from bot import test_webhook_gate  # noqa: E402
-from bot.procutil import install_data_dir, install_root  # noqa: E402
+from bot.procutil import install_data_dir, install_root, read_dotenv  # noqa: E402
 
 API = "https://discord.com/api/v10"
 
@@ -48,6 +50,12 @@ POWERS = (
     ("admin", ADMINISTRATOR),
     ("manage_webhooks", MANAGE_WEBHOOKS),
     ("manage_server", MANAGE_GUILD),
+    ("manage_roles", MANAGE_ROLES),
+)
+# What a channel's permission overwrite can add on its own. Administrator cannot
+# be granted per channel; Manage Roles there is "Manage Permissions".
+CHANNEL_POWERS = (
+    ("manage_webhooks", MANAGE_WEBHOOKS),
     ("manage_roles", MANAGE_ROLES),
 )
 POWER_LABELS = {
@@ -65,20 +73,6 @@ class AuditError(Exception):
 
 
 # --- reading ----------------------------------------------------------------
-
-
-def read_env(root: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    try:
-        text = (root / ".env").read_text(encoding="utf-8")
-    except OSError:
-        return env
-    for line in text.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip().strip("'\"")
-    return env
 
 
 def _get(token: str, path: str):
@@ -104,7 +98,7 @@ def _members(token: str, guild_id: str) -> list | dict:
     for _ in range(50):  # 50,000 members is far past any server this bot is in
         page = _get(token, f"/guilds/{guild_id}/members?limit=1000&after={after}")
         if isinstance(page, dict):
-            return page if not out else out
+            return page  # even after earlier pages: a short list would hide holders
         out.extend(page)
         if len(page) < 1000:
             break
@@ -194,6 +188,31 @@ def analyze(raw: dict, *, guild_id: str, owner_id: str | None,
         })
     webhooks.sort(key=lambda w: (not w["test_webhook"], w["name"].lower(), w["id"]))
 
+    # A channel's permission overwrites can grant Manage Webhooks (copy that
+    # channel's webhook links) or Manage Permissions to someone who has
+    # neither server-wide, so the holders list alone would miss them.
+    member_names = {str((m.get("user") or {}).get("id", "")): (m.get("user") or {}).get("username", "?")
+                    for m in members}
+    channel_grants = []
+    for c in raw.get("channels") or []:
+        if not isinstance(c, dict):
+            continue
+        for ow in c.get("permission_overwrites") or []:
+            powers = [name for name, bit in CHANNEL_POWERS if int(ow.get("allow", 0) or 0) & bit]
+            if not powers:
+                continue
+            tid = str(ow.get("id", ""))
+            is_role = int(ow.get("type", 0) or 0) == 0
+            channel_grants.append({
+                "channel_id": str(c.get("id", "")),
+                "channel": c.get("name", "?"),
+                "target_id": tid,
+                "target": (roles.get(tid, {}).get("name", tid) if is_role else member_names.get(tid, tid)),
+                "target_kind": "role" if is_role else "member",
+                "powers": powers,
+            })
+    channel_grants.sort(key=lambda g: (g["channel"].lower(), g["target"].lower()))
+
     other_guilds = sorted(
         g.get("name", "?") for g in raw.get("guilds") or []
         if isinstance(g, dict) and str(g.get("id")) != guild_id
@@ -208,6 +227,7 @@ def analyze(raw: dict, *, guild_id: str, owner_id: str | None,
         },
         "everyone_powers": _powers(everyone_perms),
         "holders": holders,
+        "channel_grants": channel_grants,
         "webhooks": webhooks,
         "bot_public": app.get("bot_public"),
         "bot_require_code_grant": app.get("bot_require_code_grant"),
@@ -238,6 +258,11 @@ def render(report: dict) -> str:
     ]
     for h in report["holders"]:
         lines.append(f"  {h['kind']:<8} {h['name']}: {_powers_text(h['powers'])}")
+    lines += ["", "Channel-level grants (Manage Webhooks there lets them copy that channel's links):"]
+    for g in report["channel_grants"]:
+        lines.append(f"  #{g['channel']}: {g['target_kind']} {g['target']}: {_powers_text(g['powers'])}")
+    if not report["channel_grants"]:
+        lines.append("  none")
     lines += ["", "Webhooks (anyone with Manage Webhooks can copy these links):"]
     for w in report["webhooks"]:
         tag = "  [test webhook: acts as you while test mode is armed]" if w["test_webhook"] else ""
@@ -270,6 +295,17 @@ def diff(old: dict, new: dict) -> list[str]:
     for wid, w in old_w.items():
         if wid not in new_w:
             out.append(f"Webhook removed: {w['name']} in #{w['channel']}")
+    def _grant_key(g):
+        return (g["channel_id"], g["target_id"])
+    old_g = {_grant_key(g): g for g in old.get("channel_grants", [])}
+    new_g = {_grant_key(g): g for g in new.get("channel_grants", [])}
+    for key, g in new_g.items():
+        if key not in old_g or set(g["powers"]) != set(old_g[key]["powers"]):
+            out.append(f"Channel grant: {g['target_kind']} {g['target']} has "
+                       f"{_powers_text(g['powers'])} in #{g['channel']}")
+    for key, g in old_g.items():
+        if key not in new_g:
+            out.append(f"Channel grant removed: {g['target_kind']} {g['target']} in #{g['channel']}")
     og, ng = old.get("guild", {}), new.get("guild", {})
     for key, label in (("mfa_level", "2FA level"), ("verification_level", "verification level"),
                        ("owner_is_me", "you own the server")):
@@ -292,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     root = install_root(_SCRIPT_ROOT)
-    env = read_env(root)
+    env = read_dotenv(root)
     try:
         raw = fetch(env)
     except AuditError as e:
@@ -302,12 +338,17 @@ def main(argv: list[str] | None = None) -> int:
         raw,
         guild_id=env.get("DISCORD_GUILD_ID", ""),
         owner_id=env.get("DISCORD_USER_ID"),
-        test_webhook_ids={w.strip() for w in env.get("TEST_WEBHOOK_IDS", "").split(",") if w.strip()},
+        # Parsed exactly as bot/config.py does, so the flag matches what the bot trusts.
+        test_webhook_ids=set(filter(None, env.get("TEST_WEBHOOK_IDS", "").split(","))),
         armed=test_webhook_gate.is_armed(install_data_dir(root)),
     )
     if args.diff:
+        old_path = Path(args.diff)
+        if not old_path.exists():
+            print(f"No earlier report at {args.diff} to compare with. Save one with --json.")
+            return 0
         try:
-            old = json.loads(Path(args.diff).read_text(encoding="utf-8"))
+            old = json.loads(old_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             print(f"discord_audit: could not read {args.diff}: {type(e).__name__}", file=sys.stderr)
             return 2

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 import discord
 
 from bot import config, secret_detect, vault
+from bot import test_webhook_gate as webhook_gate
 from bot.procutil import run_capture
 from bot.discord import channels
 from bot.discord import spawn_colors
@@ -2224,14 +2225,15 @@ class ForumManager:
         if not isinstance(ch, discord.Thread):
             return None
 
-        # Bot/webhook role-assignment parity with on_message in bot.py:
-        # TEST_WEBHOOK_IDS messages are user-shaped, even though m.author.bot is True.
-        # Not gated on test mode being armed: this only labels history for
-        # context priming and grants nothing (on_message is the gate).
-        test_webhook_ids = set(config.TEST_WEBHOOK_IDS or ())
+        # Bot/webhook role-assignment parity with on_message in bot.py: a test
+        # webhook's message is user-shaped (even though m.author.bot is True)
+        # only while test mode is armed. Unarmed, on_message ignored it, and
+        # quoting it as a prior user message would hand whoever holds the
+        # webhook's link the owner's voice in the next session's briefing.
+        trust_test_webhooks = webhook_gate.is_armed()
 
         def _is_user_msg(m: discord.Message) -> bool:
-            if m.webhook_id and str(m.webhook_id) in test_webhook_ids:
+            if trust_test_webhooks and webhook_gate.is_listed_test_webhook(m.webhook_id):
                 return True
             if self._client.user and m.author.id == self._client.user.id:
                 return False

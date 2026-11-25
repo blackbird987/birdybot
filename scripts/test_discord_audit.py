@@ -4,7 +4,11 @@
     other power, the server owner is labelled, members with no power are left out
   * the bot running here is "this bot", the owner is "me", other bots are "bot"
   * webhook tokens and URLs never reach the report, the JSON or the text
-  * diff names new, changed and gone holders and webhooks, and settings changes
+  * channel overwrites that grant Manage Webhooks or Manage Permissions are
+    listed, so someone with no server-wide power is still seen
+  * diff names new, changed and gone holders, grants and webhooks, and
+    settings changes; a missing baseline is not an error
+  * a member page that fails after earlier ones is an error, not a short list
   * the source can only GET: no other HTTP method appears in the file
   * a missing token exits 2 without touching the network
 
@@ -66,7 +70,15 @@ def _raw() -> dict:
             {"id": "901", "name": "Feed", "channel_id": "c2", "token": WEBHOOK_TOKEN + "2",
              "url": WEBHOOK_URL + "2", "user": {"username": "awas"}},
         ],
-        "channels": [{"id": "c1", "name": "general"}, {"id": "c2", "name": "news"}],
+        "channels": [
+            {"id": "c1", "name": "general", "permission_overwrites": [
+                {"id": "5", "type": 1, "allow": str(audit.MANAGE_WEBHOOKS), "deny": "0"},
+                {"id": "r_hooks", "type": 0, "allow": str(1 << 10), "deny": "0"},
+            ]},
+            {"id": "c2", "name": "news", "permission_overwrites": [
+                {"id": "r_roles", "type": 0, "allow": str(audit.MANAGE_ROLES), "deny": "0"},
+            ]},
+        ],
         "app": {"id": APP, "bot_public": True, "bot_require_code_grant": False},
         "guilds": [{"id": GUILD, "name": "Home"}, {"id": "200", "name": "Elsewhere"}],
     }
@@ -95,6 +107,15 @@ def test_analysis() -> None:
     check(r["guild"]["owner_is_me"] is True, "owner_is_me")
     check(r["webhooks"][0]["test_webhook"] and r["webhooks"][0]["channel"] == "general",
           "the test webhook is flagged and sorted first, with its channel name")
+
+    grants = {(g["channel"], g["target"]): g for g in r["channel_grants"]}
+    check(set(grants) == {("general", "plain"), ("news", "Roles")},
+          "channel overwrites granting webhook or permission powers are listed, others are not")
+    check(grants[("general", "plain")]["target_kind"] == "member"
+          and grants[("general", "plain")]["powers"] == ["manage_webhooks"],
+          "a member's channel grant names the member and the power")
+    check(grants[("news", "Roles")]["target_kind"] == "role", "a role's channel grant names the role")
+    check("#general: member plain: Manage Webhooks" in audit.render(r), "the text lists channel grants")
 
     raw = _raw()
     raw["roles"][0]["permissions"] = str(audit.MANAGE_WEBHOOKS)
@@ -134,6 +155,9 @@ def test_diff() -> None:
     raw["webhooks"] = [w for w in raw["webhooks"] if w["id"] != "901"]
     raw["guild"]["mfa_level"] = 1
     raw["app"]["bot_public"] = False
+    raw["channels"][0]["permission_overwrites"] = []  # plain loses Manage Webhooks in #general
+    raw["channels"][1]["permission_overwrites"].append(
+        {"id": "3", "type": 1, "allow": str(audit.MANAGE_WEBHOOKS), "deny": "0"})
     lines = audit.diff(old, _report(raw))
     text = "\n".join(lines)
     check(any(l.startswith("New: human newmod has Administrator") for l in lines), "a new holder is named")
@@ -143,6 +167,8 @@ def test_diff() -> None:
     check("Webhook removed: Feed" in text, "a removed webhook is named")
     check("Changed: 2FA level 0 -> 1" in text, "a 2FA change is named")
     check("Changed: bot is public True -> False" in text, "a public-bot change is named")
+    check("Channel grant: member awas has Manage Webhooks in #news" in text, "a new channel grant is named")
+    check("Channel grant removed: member plain in #general" in text, "a removed channel grant is named")
 
 
 def test_source_is_get_only() -> None:
@@ -153,6 +179,50 @@ def test_source_is_get_only() -> None:
     check(src.count('method="GET"') == 1 and src.count("method=") == 1, "the one request sets method=\"GET\"")
     check(src.count("urlopen(") == 1 and src.count("Request(") == 1, "there is exactly one request site")
     check("print(token" not in src and "print(env" not in src, "the token and env are never printed")
+
+
+def test_members_paging() -> None:
+    print("member paging")
+    pages = [[{"user": {"id": str(i)}} for i in range(1000)], {"_error": "HTTP 500 on /guilds/1/members"}]
+    real_get = audit._get
+    audit._get = lambda _t, _p: pages.pop(0)
+    try:
+        got = audit._members("t", "1")
+    finally:
+        audit._get = real_get
+    check(isinstance(got, dict) and got.get("_error"),
+          "a page that fails after earlier ones is an error, not a silently short list")
+
+
+def test_missing_baseline() -> None:
+    print("diff with no earlier report")
+    import io
+    import contextlib
+    import tempfile
+    real = (audit.read_dotenv, audit.install_root, audit.fetch)
+    audit.read_dotenv = lambda _root: {"DISCORD_GUILD_ID": GUILD, "DISCORD_USER_ID": OWNER}
+    audit.install_root = lambda p: p
+    audit.fetch = lambda _env: _raw()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = audit.main(["--diff", str(Path(td) / "none.json")])
+            check(code == 0 and "No earlier report" in buf.getvalue(), "a missing baseline says so and exits 0")
+            bad = Path(td) / "bad.json"
+            bad.write_text("{nope")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = audit.main(["--diff", str(bad)])
+            check(code == 2, "an unparsable baseline exits 2")
+            good = Path(td) / "good.json"
+            with contextlib.redirect_stdout(buf := io.StringIO()):
+                audit.main(["--json"])
+            good.write_text(buf.getvalue())
+            with contextlib.redirect_stdout(buf := io.StringIO()):
+                code = audit.main(["--diff", str(good)])
+            check(code == 0 and "No changes" in buf.getvalue(), "a saved --json report diffs clean against itself")
+    finally:
+        audit.read_dotenv, audit.install_root, audit.fetch = real
 
 
 def test_missing_token() -> None:
@@ -167,13 +237,13 @@ def test_missing_token() -> None:
         except audit.AuditError:
             raised = True
         check(raised and not calls, "no token: AuditError before any request")
-        real_read, real_root = audit.read_env, audit.install_root
-        audit.read_env = lambda _root: {}
+        real_read, real_root = audit.read_dotenv, audit.install_root
+        audit.read_dotenv = lambda _root: {}
         audit.install_root = lambda p: p
         try:
             check(audit.main([]) == 2, "main exits 2 with no token")
         finally:
-            audit.read_env, audit.install_root = real_read, real_root
+            audit.read_dotenv, audit.install_root = real_read, real_root
     finally:
         audit._get = real_get
 
@@ -183,6 +253,8 @@ def main() -> int:
     test_no_secrets()
     test_diff()
     test_source_is_get_only()
+    test_members_paging()
+    test_missing_baseline()
     test_missing_token()
     if FAILS:
         print(f"\nFAIL: {len(FAILS)} of {CHECKS} checks failed")

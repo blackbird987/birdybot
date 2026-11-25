@@ -33,8 +33,9 @@ Test mode:
   The bot treats these webhooks as the owner only while test mode is armed,
   which needs a file in the bot's data dir that only this machine can write
   (bot/test_webhook_gate.py). send, send-file, edit, new-post and run-suite
-  arm it for 30 minutes when it is off. `send --no-arm` sends without arming,
-  to check that the bot ignores an unarmed webhook.
+  arm it for 30 minutes when it is off or has under 10 minutes left.
+  `send --no-arm` sends without arming, to check that the bot ignores an
+  unarmed webhook.
 """
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
@@ -192,31 +193,44 @@ def _fmt_left(seconds):
     return f"{round(seconds / 60)} min"
 
 
-def _ensure_armed():
-    """Arm test mode for the default window if it is off, saying so once."""
+# Sending tops test mode back up to the default window when less than this is
+# left, so a run-suite started near the end of a window does not lapse midway.
+_TOP_UP_BELOW_S = 10 * 60
+
+
+def _data_dir_or_exit():
+    """The live bot's data dir. Never fall back to this checkout's: an arm file
+    written there would be one the running bot never reads."""
     if DATA_DIR is None:
-        print("Warning: could not find the bot's data dir; test mode not armed")
+        print("Could not find the installed bot's data dir; test mode unchanged")
+        sys.exit(1)
+    return DATA_DIR
+
+
+def _ensure_armed():
+    """Arm test mode for the default window if it is off or nearly over."""
+    data_dir = _data_dir_or_exit()
+    left = test_webhook_gate.remaining(data_dir)
+    if left is not None and left >= _TOP_UP_BELOW_S:
         return
-    if test_webhook_gate.is_armed(DATA_DIR):
-        return
-    test_webhook_gate.arm(test_webhook_gate.DEFAULT_MINUTES, DATA_DIR)
+    test_webhook_gate.arm(test_webhook_gate.DEFAULT_MINUTES, data_dir)
     print(f"Test mode armed for {test_webhook_gate.DEFAULT_MINUTES} min "
           f"(disarm with: discord_test.py disarm)")
 
 
 def cmd_arm(minutes):
-    expires_at = test_webhook_gate.arm(minutes, DATA_DIR)
+    expires_at = test_webhook_gate.arm(minutes, _data_dir_or_exit())
     left = expires_at - time.time()
     print(f"Test mode armed for {_fmt_left(left)}: test webhooks act as the owner until then")
 
 
 def cmd_disarm():
-    removed = test_webhook_gate.disarm(DATA_DIR)
+    removed = test_webhook_gate.disarm(_data_dir_or_exit())
     print("Test mode disarmed" if removed else "Test mode was already off")
 
 
 def cmd_armed():
-    left = test_webhook_gate.remaining(DATA_DIR)
+    left = test_webhook_gate.remaining(_data_dir_or_exit())
     if left is None:
         print("Test mode is off: the bot ignores test webhooks")
     else:
