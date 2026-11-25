@@ -215,6 +215,33 @@ def install_root(script_root: Path) -> Path:
     return root if (root / "bot" / "__main__.py").exists() else script_root
 
 
+def install_data_dir(root: Path) -> Path:
+    """Where the installed bot keeps its data, without importing bot.config.
+
+    Mirrors config's DATA_DIR resolution for the one case that matters: the
+    value in .env is relative (`DATA_DIR=data`) and the bot resolves it against
+    its own working directory, which is always the install root. Pair it with
+    ``install_root`` so a script run from a build worktree still finds the live
+    bot's files rather than the worktree's empty ``data/`` tree.
+    """
+    value = os.getenv("DATA_DIR")
+    if not value:
+        env_file = Path(root) / ".env"
+        if env_file.exists():
+            try:
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("DATA_DIR=") and not line.startswith("#"):
+                        value = line.split("=", 1)[1].strip().strip("'\"")
+                        break
+            except OSError:
+                value = None
+    if not value:
+        return Path(root) / "data"
+    p = Path(value)
+    return p if p.is_absolute() else Path(root) / p
+
+
 def is_process_alive(pid: int) -> bool:
     """Is a process with this PID running? Says nothing about *which* process.
 

@@ -22,6 +22,30 @@ python scripts/discord_test.py <command>
 - `read <channel_or_thread_id> [limit]` — read messages with embeds/buttons
 - `wait-response <channel_id> [timeout]` — poll for bot response after sending
 - `run-suite` — automated test sequence (forum creation, thread resume, archived resume, dedup, tags)
+- `arm [minutes]` / `disarm` / `armed`: open, close or show test mode (below)
+
+**Test mode (why the webhooks need arming).** A message from a webhook in
+`TEST_WEBHOOK_IDS` is treated as the owner, which means a bypass-mode Claude
+session on this PC. A webhook URL is not a private credential: anyone in the
+server with Manage Webhooks, and every bot with Administrator, can copy it from
+Server Settings > Integrations. So since 2026-11 the pass also needs a
+short-lived arm file in the bot's data dir (`test_webhooks_armed.json`, mode
+0600, owned by the bot's user, at most 4 hours ahead), which only someone on
+this machine can write. `send`, `send-file`, `edit`, `new-post` and `run-suite`
+arm it for 30 minutes on their own; `--no-arm` skips that (used to check the
+gate). While unarmed, a test-webhook message is ignored, logged as a WARNING,
+and the owner gets one Ark alert per webhook per hour saying its link may have
+leaked. The alert never quotes the message. Everything fails closed: a missing,
+expired, malformed, symlinked, group-readable or foreign-owned file means off.
+Code: `bot/test_webhook_gate.py`. Harness: `scripts/test_test_webhook_gate.py`.
+
+**Who can reach the bot.** `python scripts/discord_audit.py` prints, read-only,
+who in the server holds Administrator, Manage Webhooks, Manage Server or Manage
+Roles, every webhook (name, channel, creator; never its URL), 2FA and
+verification levels, whether the bot is public and which other servers it is
+in. `--json` saves a report and `--diff old.json` prints only what changed,
+which is what the weekly security check runs. Exit 2 means the token is missing
+or Discord could not be reached. Harness: `scripts/test_discord_audit.py`.
 
 **Quick verification after changes:**
 ```bash

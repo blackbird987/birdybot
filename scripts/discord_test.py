@@ -2,7 +2,10 @@
 
 Commands:
   setup-webhook <channel_id>     Create a test webhook, print ID + URL
-  send <channel_or_thread_id> <message>   Send via appropriate webhook
+  arm [minutes]                  Open test mode (default 30, max 240)
+  disarm                         Close test mode now
+  armed                          Show how long test mode has left
+  send [--no-arm] <channel_or_thread_id> <message>   Send via appropriate webhook
   send-file <channel_or_thread_id> <path> [text]   Send a file via webhook
   edit <channel_or_thread_id> <msg_id> <text>      Edit a webhook message
   new-post <forum_id> <title> <text>      Start a forum post via webhook
@@ -25,6 +28,13 @@ Webhook setup:
   2. Create forum webhook:  setup-webhook <forum_id>
      -> Set TEST_WEBHOOK_URL in .env
   3. Add BOTH webhook IDs to TEST_WEBHOOK_IDS (comma-separated)
+
+Test mode:
+  The bot treats these webhooks as the owner only while test mode is armed,
+  which needs a file in the bot's data dir that only this machine can write
+  (bot/test_webhook_gate.py). send, send-file, edit, new-post and run-suite
+  arm it for 30 minutes when it is off. `send --no-arm` sends without arming,
+  to check that the bot ignores an unarmed webhook.
 """
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
@@ -53,11 +63,16 @@ try:
     sys.path.insert(0, _SCRIPT_ROOT)
     from pathlib import Path as _Path
 
-    from bot.procutil import install_root
+    from bot.procutil import install_data_dir, install_root
 
     _ROOT = str(install_root(_Path(_SCRIPT_ROOT)))
+    # The live bot's data dir, where the test-mode arm file lives.
+    DATA_DIR = install_data_dir(_Path(_ROOT))
 except Exception:
     _ROOT = _SCRIPT_ROOT
+    DATA_DIR = None
+
+from bot import test_webhook_gate  # noqa: E402  -- stdlib only, no bot.config
 ENV_PATH = os.path.join(_ROOT, ".env")
 _env = {}
 try:
@@ -166,6 +181,46 @@ def _resolve_webhook_for_target(target_id):
         return None, "Cannot send directly to a forum channel — target a thread instead"
 
     return None, f"Unknown channel type {ch_type}"
+
+
+# --- Test mode ---
+
+
+def _fmt_left(seconds):
+    if seconds < 60:
+        return f"{max(1, int(seconds))} s"
+    return f"{round(seconds / 60)} min"
+
+
+def _ensure_armed():
+    """Arm test mode for the default window if it is off, saying so once."""
+    if DATA_DIR is None:
+        print("Warning: could not find the bot's data dir; test mode not armed")
+        return
+    if test_webhook_gate.is_armed(DATA_DIR):
+        return
+    test_webhook_gate.arm(test_webhook_gate.DEFAULT_MINUTES, DATA_DIR)
+    print(f"Test mode armed for {test_webhook_gate.DEFAULT_MINUTES} min "
+          f"(disarm with: discord_test.py disarm)")
+
+
+def cmd_arm(minutes):
+    expires_at = test_webhook_gate.arm(minutes, DATA_DIR)
+    left = expires_at - time.time()
+    print(f"Test mode armed for {_fmt_left(left)}: test webhooks act as the owner until then")
+
+
+def cmd_disarm():
+    removed = test_webhook_gate.disarm(DATA_DIR)
+    print("Test mode disarmed" if removed else "Test mode was already off")
+
+
+def cmd_armed():
+    left = test_webhook_gate.remaining(DATA_DIR)
+    if left is None:
+        print("Test mode is off: the bot ignores test webhooks")
+    else:
+        print(f"Test mode is armed: {_fmt_left(left)} left")
 
 
 # --- Commands ---
@@ -662,11 +717,27 @@ def main():
         return
 
     cmd = sys.argv[1]
+    if cmd in ("send", "send-file", "edit", "new-post", "run-suite"):
+        if "--no-arm" in sys.argv[2:]:
+            sys.argv.remove("--no-arm")
+        else:
+            _ensure_armed()
     if cmd == "setup-webhook":
         cmd_setup_webhook(sys.argv[2] if len(sys.argv) > 2 else LOBBY_ID)
+    elif cmd == "arm":
+        try:
+            minutes = float(sys.argv[2]) if len(sys.argv) > 2 else test_webhook_gate.DEFAULT_MINUTES
+        except ValueError:
+            print("Usage: arm [minutes]")
+            return
+        cmd_arm(minutes)
+    elif cmd == "disarm":
+        cmd_disarm()
+    elif cmd == "armed":
+        cmd_armed()
     elif cmd == "send":
         if len(sys.argv) < 4:
-            print("Usage: send <channel_id> <message>")
+            print("Usage: send [--no-arm] <channel_id> <message>")
             return
         cmd_send(sys.argv[2], " ".join(sys.argv[3:]))
     elif cmd == "send-file":

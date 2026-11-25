@@ -2226,6 +2226,8 @@ class ForumManager:
 
         # Bot/webhook role-assignment parity with on_message in bot.py:
         # TEST_WEBHOOK_IDS messages are user-shaped, even though m.author.bot is True.
+        # Not gated on test mode being armed: this only labels history for
+        # context priming and grants nothing (on_message is the gate).
         test_webhook_ids = set(config.TEST_WEBHOOK_IDS or ())
 
         def _is_user_msg(m: discord.Message) -> bool:
