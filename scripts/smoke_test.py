@@ -323,6 +323,16 @@ def _probe_bot_response(discord_test) -> CheckResult:
     msgs = discord_test.api_call("GET", f"/channels/{LOBBY_ID}/messages?limit=1")
     last_id = msgs[0]["id"] if isinstance(msgs, list) and msgs else "0"
 
+    # The bot ignores the test webhook unless test mode is armed from this
+    # machine (bot/test_webhook_gate.py), and alerts the owner that its link
+    # may have leaked. Arm it the same way discord_test.py's own sends do.
+    try:
+        discord_test._ensure_armed()
+    except SystemExit:
+        return CheckResult("Bot responding", True,
+                           "Skipped: could not find the bot's data dir to arm test mode",
+                           partial=True)
+
     # Send test message
     test_msg = f"[smoke-test] ping {int(time.time())}"
     result = discord_test.webhook_send(LOBBY_WEBHOOK_URL, test_msg)
