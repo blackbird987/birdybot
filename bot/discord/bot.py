@@ -31,6 +31,7 @@ from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, get_most_restrictive_bash
 from bot.discord.adapter import DiscordMessenger
 from bot import auto_update
+from bot import test_webhook_gate as webhook_gate
 from bot.discord import attachments
 from bot.discord.attachments import PendingImagesMixin
 from bot.discord import dashboard as dashboard_mod
@@ -563,13 +564,15 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         if message.author == self.user:
             return
 
-        _is_test_webhook = (
-            config.TEST_WEBHOOK_IDS
-            and message.webhook_id
-            and str(message.webhook_id) in config.TEST_WEBHOOK_IDS
-        )
+        # A listed test webhook passes as the owner, but only while test mode
+        # is armed from this machine (bot/test_webhook_gate.py). Its URL is
+        # visible to anyone with Manage Webhooks, so the URL alone is not proof.
+        _listed_test_webhook = webhook_gate.is_listed_test_webhook(message.webhook_id)
+        _is_test_webhook = _listed_test_webhook and webhook_gate.is_armed()
 
         if message.author.bot and not _is_test_webhook:
+            if _listed_test_webhook and self._in_scope(message.guild, message.channel):
+                await self._report_unarmed_test_webhook(message)
             return
 
         if not self._in_scope(message.guild, message.channel):
@@ -609,6 +612,27 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
             return
         await self._route_screened(message, msg_access, door)
 
+    async def _report_unarmed_test_webhook(self, message: discord.Message) -> None:
+        """A test webhook spoke while test mode was off: log it, tell the owner.
+
+        The message itself is dropped by the caller. The alert never carries its
+        content (it is whatever the link's holder chose to send), and goes out at
+        most once an hour per webhook so a flood cannot flood The Ark.
+        """
+        log.warning(
+            "Ignored a test-webhook message while test mode is off "
+            "(webhook %s, channel %s)", message.webhook_id, message.channel.id,
+        )
+        if not webhook_gate.should_alert(message.webhook_id):
+            return
+        notifier = getattr(self, "_notifier", None)
+        if not notifier:
+            return
+        try:
+            await notifier.broadcast(webhook_gate.ALERT_TEXT)
+        except Exception:
+            log.exception("Could not send the unarmed test-webhook alert")
+
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """Screen an edit: a key added after the fact never reaches a session,
         but it stays visible in the channel otherwise.
@@ -623,10 +647,8 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
             return
         author = data.get("author") or {}
         webhook_id = data.get("webhook_id")
-        is_test_webhook = bool(
-            config.TEST_WEBHOOK_IDS and webhook_id
-            and str(webhook_id) in config.TEST_WEBHOOK_IDS
-        )
+        # Same gate as on_message: listed and armed, or it is just a webhook.
+        is_test_webhook = webhook_gate.is_trusted_test_webhook(webhook_id)
         if self.user and str(author.get("id")) == str(self.user.id):
             return
         if (webhook_id or author.get("bot")) and not is_test_webhook:

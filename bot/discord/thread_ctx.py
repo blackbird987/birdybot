@@ -33,6 +33,8 @@ class ThreadContextMixin:
         """Every non-owner this thread belongs to or has heard from.
 
         A test webhook counts as the owner, the same way on_message treats it.
+        on_message only lets one through while test mode is armed, so an
+        unarmed webhook never reaches the thread to be recorded here.
         """
         if info is None:
             return set()

@@ -204,6 +204,8 @@ Needs the test webhooks in `.env`; one-time setup is in
 - `read <channel_or_thread_id> [limit]`: read messages with embeds/buttons
 - `wait-response <channel_id> [timeout]`: poll for bot response after sending
 - `run-suite`: automated test sequence (forum creation, thread resume, archived resume, dedup, tags)
+- `arm [minutes]` / `disarm` / `armed`: test webhooks act as the owner only while armed from this machine. Sending arms it for 30 min on its own (`--no-arm` skips). Why: `docs/design/discord-testing.md`, harness `scripts/test_test_webhook_gate.py`
+- `python scripts/discord_audit.py [--json|--diff old.json]`: read-only report of who holds admin and webhook powers in the server. `scripts/test_discord_audit.py`
 
 **Quick verification after changes:**
 ```bash

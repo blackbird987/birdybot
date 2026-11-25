@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v0.102.39, Test webhooks need arming, Discord audit (2026-11-25)
+
+### Security
+- **Test webhooks only act as the owner while test mode is armed from this machine.** A webhook URL can be copied by anyone in the server with Manage Webhooks and by any bot with Administrator, and a test webhook's message used to count as the owner unconditionally, which meant a bypass-mode session on this PC. It now also needs a short-lived 0600 arm file in the bot's data dir, which `discord_test.py` writes on its own before sending (`arm`, `disarm`, `armed`; `--no-arm` to skip), and so does the response probe in `smoke_test.py --respond`. An unarmed test-webhook message is ignored, logged, raises one Ark alert per webhook per hour that the link may have leaked, and is quoted as a bot message rather than yours when a later session is briefed on the thread's history. Harness: `scripts/test_test_webhook_gate.py`.
+
+### Added
+- **`discord_audit.py`: read-only report of who holds admin and webhook powers in the bot's server**, server-wide or through one channel's permission overwrites, plus webhooks (never their URLs), 2FA, whether the bot is public and the other servers it is in. `--json` and `--diff old.json` for a routine check. Harness: `scripts/test_discord_audit.py`.
+
 ## v0.102.37, One end card per session or chain (2026-11-23)
 
 ### Changed

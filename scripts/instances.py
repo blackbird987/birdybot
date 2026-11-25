@@ -53,7 +53,7 @@ sys.path.insert(0, str(_SCRIPT_ROOT))
 # marker file and can rewrite roots.json -- both disqualifying for a read-only
 # tool. Everything imported below is dependency-free and side-effect-free.
 from bot.claude.types import Instance, InstanceStatus  # noqa: E402
-from bot.procutil import install_root  # noqa: E402
+from bot.procutil import install_data_dir, install_root  # noqa: E402
 
 # The bot's real installation, even when this script is run from a build
 # worktree (which has its own empty data/ tree and would read as a bot that has
@@ -61,29 +61,8 @@ from bot.procutil import install_root  # noqa: E402
 ROOT = install_root(_SCRIPT_ROOT)
 
 
-def _resolve_data_dir(root: Path) -> Path:
-    """Where the installed bot keeps state.json, without importing bot.config.
-
-    Mirrors config's DATA_DIR resolution for the one case that matters: the
-    value in .env is relative (`DATA_DIR=data`) and the bot resolves it against
-    its own working directory, which is always the install root.
-    """
-    value = os.getenv("DATA_DIR")
-    if not value:
-        env_file = root / ".env"
-        if env_file.exists():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("DATA_DIR=") and not line.startswith("#"):
-                        value = line.split("=", 1)[1].strip().strip("'\"")
-                        break
-            except OSError:
-                value = None
-    if not value:
-        return root / "data"
-    p = Path(value)
-    return p if p.is_absolute() else root / p
+# Mirrors config's DATA_DIR resolution without importing bot.config (see above).
+_resolve_data_dir = install_data_dir
 
 
 DATA_DIR = _resolve_data_dir(ROOT)

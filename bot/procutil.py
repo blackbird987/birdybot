@@ -215,6 +215,41 @@ def install_root(script_root: Path) -> Path:
     return root if (root / "bot" / "__main__.py").exists() else script_root
 
 
+def read_dotenv(root: Path) -> dict[str, str]:
+    """The KEY=value pairs in *root*/.env, without importing bot.config.
+
+    Plain parsing only: blank lines and ``#`` comments are skipped and one
+    layer of quotes is stripped. A missing or unreadable file reads as empty.
+    """
+    env: dict[str, str] = {}
+    try:
+        text = (Path(root) / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return env
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip("'\"")
+    return env
+
+
+def install_data_dir(root: Path) -> Path:
+    """Where the installed bot keeps its data, without importing bot.config.
+
+    Mirrors config's DATA_DIR resolution for the one case that matters: the
+    value in .env is relative (`DATA_DIR=data`) and the bot resolves it against
+    its own working directory, which is always the install root. Pair it with
+    ``install_root`` so a script run from a build worktree still finds the live
+    bot's files rather than the worktree's empty ``data/`` tree.
+    """
+    value = os.getenv("DATA_DIR") or read_dotenv(root).get("DATA_DIR")
+    if not value:
+        return Path(root) / "data"
+    p = Path(value)
+    return p if p.is_absolute() else Path(root) / p
+
+
 def is_process_alive(pid: int) -> bool:
     """Is a process with this PID running? Says nothing about *which* process.
 
