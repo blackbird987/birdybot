@@ -23,6 +23,7 @@ import discord
 from bot.textutil import parse_iso_utc
 from bot import config
 from bot.discord.channels import get_or_create_ark_thread
+from bot.platform.redact import redact_secrets
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -338,7 +339,7 @@ async def _post_finding(bot: ClaudeBot, verdict: str, severity: str) -> None:
                 mention = f"<@{user_id}> "
                 will_mention = True
 
-    safe_verdict = verdict.strip()[:1500].replace("```", "'''")
+    safe_verdict = redact_secrets(verdict.strip())[:1500].replace("```", "'''")
     body = f"{mention}**Log triage** ({severity})\n```\n{safe_verdict}\n```"
 
     try:

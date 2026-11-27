@@ -197,6 +197,14 @@ class PromptMixin:
         if quiet_text:
             prompt = quiet_text + "\n\n" + prompt
 
+        # The secret filter's notice (bot/platform/redact.py): what it hid
+        # from this session's previous reply. Once, then cleared, so a retry
+        # or a later turn of the same instance does not repeat it.
+        hidden_note = getattr(instance, "_hidden_note", None)
+        if hidden_note:
+            instance._hidden_note = None
+            prompt = hidden_note + "\n\n" + prompt
+
         if instance.session_id and instance.origin not in PEER_ORIGINS:
             master_block = self._build_master_context_block(instance)
             if master_block:

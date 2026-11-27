@@ -312,8 +312,9 @@ for _line in (
     "The requested URL returned error: 403",
     "error: failed to push some refs to 'github.com:owner/repo.git'",
 ):
-    _check("ordinary error survives intact", "[REDACTED]" not in git_fail_reason(_line),
-           repr(git_fail_reason(_line)))
+    _r = git_fail_reason(_line)
+    _check("ordinary error survives intact",
+           "[REDACTED]" not in _r and "[hidden" not in _r, repr(_r))
 
 
 if _failures:

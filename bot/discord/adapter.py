@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from pathlib import Path
 
@@ -15,6 +16,74 @@ from bot.platform.formatting import FinalizeInfo
 from bot.platform.redact import redact_secrets
 
 log = logging.getLogger(__name__)
+
+# --- The outbound secret filter's exit point ---------------------------------
+#
+# Every method below that puts session-derived text on Discord runs it through
+# redact_secrets first: embed descriptions, titles, fields, footers, captions,
+# and the text of uploaded files. Call sites redact too; the filter is
+# idempotent, so a value hidden twice reads the same. See
+# docs/design/secret-intake.md, "Outbound filter".
+#
+# Direct ``channel.send`` / ``thread.send`` calls outside this class that carry
+# session output redact on their own: prompt_review.py (the reviewer's report),
+# forums.py (the transcript fallback), log_triage.py (the verdict) and
+# deploy_flow.py (deploy output). Left out on purpose, because they carry no
+# session output: alerts.py and monitoring.py (bot-built status lines),
+# wizard.py and slash_commands.py (setup prompts and command replies the bot
+# writes), interactions.py followups (button acknowledgements), dashboard.py
+# (counts and names), the archive copy in forums.py (re-posts messages that
+# already went through this class) and peer_link.py (its own confinement and
+# redaction, bot/peer_export.py).
+
+# Uploaded as filtered text. Anything else is sniffed: a small file that
+# decodes as UTF-8 is text too, the rest (pictures, archives) goes as is.
+_TEXT_SUFFIXES = frozenset({
+    ".md", ".txt", ".log", ".diff", ".patch", ".json", ".html", ".csv",
+    ".jsonl", ".yaml", ".yml", ".toml", ".env", ".py", ".sh", ".xml",
+})
+_BINARY_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm",
+    ".mp3", ".wav", ".ogg", ".zip", ".gz", ".tar", ".7z", ".pdf", ".ico",
+})
+_TEXT_UPLOAD_MAX = 25 * 1024 * 1024
+_SNIFF_MAX = 2 * 1024 * 1024
+
+
+def _redacted(text):
+    """redact_secrets for an optional string."""
+    return redact_secrets(text) if text else text
+
+
+def _safe(text: str, limit: int = 4096) -> str:
+    """Hide secrets, then make the text Discord-safe. Never the other way
+    round: the safety pass truncates, which could cut a key in half."""
+    return apply_discord_safety(redact_secrets(text or ""), limit=limit)
+
+
+def _upload(file_path: str, filename: str) -> discord.File:
+    """A Discord attachment, text filtered in memory. The file on disk is
+    never modified: it is the bot's own record of what the session wrote."""
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+    try:
+        if suffix not in _BINARY_SUFFIXES:
+            size = path.stat().st_size
+            if suffix in _TEXT_SUFFIXES and size <= _TEXT_UPLOAD_MAX:
+                raw = path.read_bytes()
+                text = raw.decode("utf-8", errors="surrogateescape")
+            elif size <= _SNIFF_MAX:
+                raw = path.read_bytes()
+                text = raw.decode("utf-8")  # strict: a binary file stays binary
+            else:
+                text = None
+            if text is not None:
+                cleaned = redact_secrets(text)
+                data = cleaned.encode("utf-8", errors="surrogateescape")
+                return discord.File(io.BytesIO(data), filename=filename)
+    except (OSError, UnicodeDecodeError):
+        pass
+    return discord.File(file_path, filename=filename)
 
 # Button style map: action prefix -> Discord button style
 _STYLE_MAP = {
@@ -166,7 +235,7 @@ class DiscordMessenger:
             return MessageHandle(platform="discord", _data={})
 
         embed = discord.Embed(
-            description=apply_discord_safety(text),
+            description=_safe(text),
             color=discord.Color.blurple(),
         )
         view = _buttons_to_view(self._shown(channel_id, buttons))
@@ -205,11 +274,11 @@ class DiscordMessenger:
         try:
             msg = await channel.fetch_message(int(message_id))
             embed = discord.Embed(
-                description=apply_discord_safety(text),
+                description=_safe(text),
                 color=color,
             )
             if footer:
-                embed.set_footer(text=footer[:2048])
+                embed.set_footer(text=_redacted(footer)[:2048])
             view = _buttons_to_view(self._shown(channel_id, buttons))
             await msg.edit(embed=embed, view=view)
         except Exception:
@@ -227,7 +296,7 @@ class DiscordMessenger:
 
         view = _buttons_to_view(self._shown(channel_id, buttons))
         msg = await channel.send(
-            content=apply_discord_safety(text, limit=2000),
+            content=_safe(text, limit=2000),
             view=view, silent=silent,
         )
         return str(msg.id)
@@ -271,19 +340,19 @@ class DiscordMessenger:
             embed = self._build_finalize_embed(finalize, color, metadata)
         else:
             embed = discord.Embed(
-                description=apply_discord_safety(text),
+                description=_safe(text),
                 color=color,
             )
             # Add metadata as inline fields (Duration, Cost, Repo, Branch)
             if metadata:
                 for k, v in metadata.items():
                     if not k.startswith("_") and v:
-                        embed.add_field(name=k, value=str(v), inline=True)
+                        embed.add_field(name=k, value=_redacted(str(v))[:1024], inline=True)
 
         if metadata:
             session_loc = metadata.get("_session_loc")
             if session_loc:
-                embed.set_footer(text=session_loc)
+                embed.set_footer(text=_redacted(str(session_loc))[:2048])
 
         view = _buttons_to_view(self._shown(channel_id, buttons))
         # Include @mention as content alongside the embed to ping the user.
@@ -312,15 +381,17 @@ class DiscordMessenger:
             return ""
         color = _CARD_COLORS.get(card.color, discord.Color.green)()
         embed = discord.Embed(
-            title=(card.title or "")[:256] or None,
-            description=apply_discord_safety(card.description) if card.description else None,
+            title=_redacted(card.title or "")[:256] or None,
+            description=_safe(card.description) if card.description else None,
             color=color,
         )
         for name, value in card.fields[:25]:
             if value:
-                embed.add_field(name=name[:256], value=value[:1024], inline=False)
+                embed.add_field(
+                    name=_redacted(name)[:256], value=_redacted(value)[:1024], inline=False,
+                )
         if card.footer:
-            embed.set_footer(text=card.footer[:2048])
+            embed.set_footer(text=_redacted(card.footer)[:2048])
         file = None
         if card.image_path:
             try:
@@ -374,7 +445,7 @@ class DiscordMessenger:
         if info.commit_hash:
             commit_val = f"`{info.commit_hash}`"
             if info.commit_message:
-                commit_val += f" {info.commit_message}"
+                commit_val += f" {redact_secrets(info.commit_message)}"
             if len(commit_val) > 1024:
                 commit_val = commit_val[:1021] + "..."
             embed.add_field(
@@ -385,7 +456,7 @@ class DiscordMessenger:
 
         # Changelog field
         if info.changelog_entries:
-            entries = "\n".join(f"\u2022 {e}" for e in info.changelog_entries)
+            entries = redact_secrets("\n".join(f"\u2022 {e}" for e in info.changelog_entries))
             if len(entries) > 1000:
                 entries = entries[:997] + "..."
             embed.add_field(
@@ -410,7 +481,7 @@ class DiscordMessenger:
             # Deferred revisions from autopilot plan review
             deferred = metadata.get("_deferred_revisions")
             if deferred:
-                items = "\n".join(f"\u2022 {d}" for d in deferred[:10])
+                items = redact_secrets("\n".join(f"\u2022 {d}" for d in deferred[:10]))
                 if len(items) > 1000:
                     items = items[:997] + "..."
                 embed.add_field(
@@ -422,7 +493,7 @@ class DiscordMessenger:
             skip = {"Duration", "Turns", "Tokens", "Cost"}
             for k, v in metadata.items():
                 if not k.startswith("_") and k not in skip and v:
-                    embed.add_field(name=k, value=str(v), inline=True)
+                    embed.add_field(name=k, value=_redacted(str(v))[:1024], inline=True)
 
         return embed
 
@@ -445,11 +516,11 @@ class DiscordMessenger:
             elif msg.embeds:
                 # Original was an embed — update embed description (4096 limit)
                 embed = msg.embeds[0].copy()
-                embed.description = apply_discord_safety(text)
+                embed.description = _safe(text)
                 await msg.edit(embed=embed, view=view)
             else:
                 await msg.edit(
-                    content=apply_discord_safety(text, limit=2000), view=view,
+                    content=_safe(text, limit=2000), view=view,
                 )
         except Exception:
             log.debug("Failed to edit message %s", msg_id, exc_info=True)
@@ -497,8 +568,8 @@ class DiscordMessenger:
         if not channel:
             return ""
 
-        file = discord.File(file_path, filename=filename)
-        msg = await channel.send(content=caption, file=file)
+        file = _upload(file_path, filename)
+        msg = await channel.send(content=_redacted(caption), file=file)
         return str(msg.id)
 
     async def send_files(
@@ -509,10 +580,8 @@ class DiscordMessenger:
         channel = await self._resolve_channel(channel_id)
         if not channel or not file_paths:
             return []
-        files = [
-            discord.File(p, filename=Path(p).name) for p in file_paths[:10]
-        ]
-        msg = await channel.send(content=caption, files=files)
+        files = [_upload(p, Path(p).name) for p in file_paths[:10]]
+        msg = await channel.send(content=_redacted(caption), files=files)
         return [str(msg.id)]
 
     def markdown_to_markup(self, md: str) -> str:

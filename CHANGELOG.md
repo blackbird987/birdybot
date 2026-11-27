@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Security
+- **Everything the bot posts to Discord now passes the secret filter at one exit point**, including the thinking card, every embed and card, and uploads: the Log and Diff buttons and `/log` used to upload the raw file. Text uploads go up redacted while the file on disk stays as it was; binary files pass untouched. The prompt review card, the log triage verdict, deploy updates and the archive fallback redact too.
+- **Real keys are known by value.** The filter reads the key files on this machine (`.env` style files in each registered repo's main checkout and in `~/.config/*/`) and hides any value whose name says it is a key, `ARC_BURNER_PK` included, in replies and in logs. Names ending in ADDRESS, ID, POOL, URL and the like are not loaded.
+- **A seed phrase without a label is now hidden** (12 to 24 BIP39 words in a row).
+
+### Changed
+- **Public ids are no longer hidden.** A tx hash or pool id in an explorer link (Dexscreener, Etherscan, Blockscout, Hyperliquid and others) or after a label like `tx`, `hash` or `pool id` shows. `HasToken=False` and token counts like `tokens: 0` show. In 523 saved replies, 13 of 14 hidden values were public data like this; a plausible password is still hidden.
+- **A hidden value now says what it was**, as `[hidden:private-key]`, `[hidden:password]`, `[hidden:token]` and so on, or `[hidden:NAME@repo/file]` for a known key in your own thread. Guests, sandboxed sessions and the other machine see a plain `[hidden]`. Logs keep `[REDACTED]`.
+- **The session learns what was hidden.** Its next turn starts with a short notice of how many values were hidden and of what kind, so it stops reprinting them and refers to keys by name. Logs record kinds and counts, never values. Design: `docs/design/secret-intake.md`, "Outbound filter". Harness: `scripts/test_redact_outbound.py`.
+
 ## v0.102.39, Test webhooks need arming, Discord audit (2026-11-25)
 
 ### Security

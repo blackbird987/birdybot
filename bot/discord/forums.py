@@ -30,6 +30,7 @@ from bot.discord.titles import is_limit_message_title, read_ai_title
 from bot.engine import repo_desc
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
+from bot.platform.redact import redact_secrets
 
 if TYPE_CHECKING:
     from bot.claude.types import Instance
@@ -2429,7 +2430,7 @@ class ForumManager:
                 if len(text) > 800:
                     text = text[:800] + "\u2026"
                 try:
-                    await channel.send(f"{role}:\n{text[:1900]}")
+                    await channel.send(redact_secrets(f"{role}:\n{text[:1900]}"))
                 except Exception:
                     break
 

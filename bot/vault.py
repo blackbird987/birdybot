@@ -57,7 +57,7 @@ _DENIED_GLOBS = (
 # the file whole, and literal_values must not take it: it runs inside the log
 # formatter, so a line logged under this lock would wait on itself.
 _lock = threading.Lock()
-_literal_cache: tuple[tuple[str, int, int], tuple[str, ...]] | None = None
+_literal_cache: tuple[tuple[str, int, int], tuple[tuple[str, str], ...]] | None = None
 _denied_cache: frozenset[str] | None = None
 
 
@@ -394,8 +394,8 @@ def names_elsewhere(repo: str) -> list[str]:
 # --- Literal values ------------------------------------------------------
 
 
-def literal_values() -> tuple[str, ...]:
-    """Every stored value long enough to strip, longest first.
+def literal_named() -> tuple[tuple[str, str], ...]:
+    """(name, value) for every stored value long enough to strip, longest first.
 
     Cached on the file's identity, so a hand edit takes effect. This sits under
     every log line and every message the bot renders, so it takes no lock and
@@ -417,14 +417,25 @@ def literal_values() -> tuple[str, ...]:
     except VaultUnavailable:
         result = cached[1] if cached is not None else ()
     else:
-        values = [
-            e["value"] for e in entries
+        pairs = [
+            (str(e.get("name", "")), e["value"]) for e in entries
             if isinstance(e.get("value"), str) and len(e["value"]) >= LITERAL_MIN_LEN
         ]
-        values.sort(key=len, reverse=True)
-        result = tuple(dict.fromkeys(values))
+        pairs.sort(key=lambda p: len(p[1]), reverse=True)
+        seen: set[str] = set()
+        out: list[tuple[str, str]] = []
+        for name, value in pairs:
+            if value not in seen:
+                seen.add(value)
+                out.append((name, value))
+        result = tuple(out)
     _literal_cache = (key, result)
     return result
+
+
+def literal_values() -> tuple[str, ...]:
+    """Every stored value long enough to strip, longest first."""
+    return tuple(v for _, v in literal_named())
 
 
 def strip_literals(text: str) -> str:

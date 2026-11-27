@@ -24,6 +24,19 @@ _HEADING_RE = re.compile(r'#{1,6}\s')
 log = logging.getLogger(__name__)
 
 
+def _publish_repo_roots(repos: dict) -> None:
+    """Tell the outbound secret filter which main checkouts hold key files.
+
+    Pushed from here rather than read by the filter, because the filter has no
+    store and sits under every message the bot posts. Never raises.
+    """
+    try:
+        from bot import keyfiles
+        keyfiles.set_repo_roots(repos)
+    except Exception:  # pragma: no cover - defensive
+        log.debug("Could not publish repo roots to the key-file reader", exc_info=True)
+
+
 class ReposMixin:
     # --- Session sandbox (read through bot/claude/sandbox.py) ---
 
@@ -41,6 +54,7 @@ class ReposMixin:
 
     def add_repo(self, name: str, path: str) -> None:
         self._repos[name] = path
+        _publish_repo_roots(self._repos)
         # Registering a repo is the opposite of parking it. remove_repo
         # already clears the flag, but a hidden repo re-pointed at a new
         # path with /repo add (no remove first) would otherwise come back
@@ -54,6 +68,7 @@ class ReposMixin:
         if name not in self._repos:
             return False
         del self._repos[name]
+        _publish_repo_roots(self._repos)
         # A name re-registered at a different path must re-derive its blurb,
         # and must not come back hidden.
         self._repo_descriptions.pop(name, None)

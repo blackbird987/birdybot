@@ -43,6 +43,7 @@ from bot.platform.formatting import (
     strip_verify_blocks,
 )
 from bot.engine import secret_scan, watches
+from bot.platform.redact import redact_report, session_notice, summarize_hits
 from bot.engine.directives import choices
 from bot.store import history as history_mod
 from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
@@ -453,6 +454,49 @@ async def notify_parent(
         log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
 
 
+def _owner_detail(ctx: RequestContext, inst: Instance) -> bool:
+    """May the final reply name a hidden key (``[hidden:NAME@repo/file]``)?
+
+    Only an owner's own turn with no guest, outside the sandbox and not for
+    the other machine. Fails closed: anything unsure gets plain ``[hidden]``.
+    """
+    try:
+        return (
+            bool(inst.vault_eligible)
+            and inst.origin not in PEER_ORIGINS
+            and not sandbox.instance_confined(ctx.store, inst, ctx=ctx)
+        )
+    except Exception:
+        return False
+
+
+def _remember_hidden(ctx: RequestContext, inst: Instance, hidden: list[str]) -> None:
+    """Keep a note for the session's next turn in this thread. Kinds only."""
+    if inst.origin in _NOT_A_TURN_ORIGINS or not ctx.channel_id:
+        return
+    try:
+        ctx.store.put_hidden_note(ctx.channel_id, {
+            "count": len(hidden),
+            "kinds": summarize_hits(hidden),
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        log.debug("Could not save the secret filter's note", exc_info=True)
+
+
+def _take_hidden_note(ctx: RequestContext, inst: Instance) -> None:
+    """Hand the thread's pending note to this turn, if it resumes the session.
+
+    Popped either way: a fresh session never wrote the reply it describes.
+    """
+    try:
+        note = ctx.store.pop_hidden_note(ctx.channel_id) if ctx.channel_id else None
+    except Exception:
+        return
+    if note and inst.session_id:
+        inst._hidden_note = session_notice(int(note.get("count") or 0), str(note.get("kinds") or ""))
+
+
 async def run_instance(
     ctx: RequestContext,
     inst: Instance,
@@ -468,6 +512,8 @@ async def run_instance(
     if inst.origin not in _NOT_A_TURN_ORIGINS:  # the tag belongs to the thread's own session
         asyncio.create_task(_try_apply_near_limit(ctx, inst, False))
     ctx.store.update_instance(inst, critical=True)
+    if inst.origin not in _NOT_A_TURN_ORIGINS:
+        _take_hidden_note(ctx, inst)
 
     on_progress = None
     on_stall = None
@@ -1496,7 +1542,9 @@ async def send_result(
     mention_uid = ctx.user_id if not has_chain else None
 
     if result_text:
-        result_text = redact_secrets(result_text)
+        result_text, hidden = redact_report(result_text, detail=_owner_detail(ctx, inst))
+        if hidden:
+            _remember_hidden(ctx, inst, hidden)
 
     # Pass structured metadata for Discord embeds
     meta = {"_status": inst.status.value, "_mode": inst.mode} if inst.status else {}

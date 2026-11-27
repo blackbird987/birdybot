@@ -371,6 +371,11 @@ def _seed_runs(text: str) -> list[Finding]:
     return out
 
 
+def seed_run_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) of each unlabelled seed phrase: the outbound filter's view."""
+    return [(f.start, f.end) for f in _seed_runs(text)]
+
+
 def _labelled_seeds(text: str) -> list[Finding]:
     """A labelled phrase of 11+ words, where a typo may have left the list."""
     words = bip39_words()

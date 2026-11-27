@@ -27,6 +27,7 @@ from bot import config
 from bot.claude.types import InstanceOrigin, InstanceStatus, InstanceType
 from bot.engine import prompt_review as pr
 from bot.discord.channels import get_or_create_ark_thread
+from bot.platform.redact import redact_secrets
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -245,7 +246,7 @@ async def _post_outcome(bot, thread, inst, report: pr.ReviewReport) -> None:
     targets = [p.target() for p in report.proposals]
     embed = discord.Embed(
         title=f"Prompt review: {len(report.proposals)} proposal(s)",
-        description=_embed_body(report, inst),
+        description=redact_secrets(_embed_body(report, inst)),
         color=0x5865F2,
     )
     view = discord.ui.View(timeout=None)
