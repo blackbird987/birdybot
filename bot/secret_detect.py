@@ -371,9 +371,26 @@ def _seed_runs(text: str) -> list[Finding]:
     return out
 
 
+def _has_varied_window(run: str) -> bool:
+    """Some 12 words in a row with at most one repeat, as a generated phrase has.
+
+    A real phrase is 12+ words drawn from 2048, so a repeat is rare; filler like
+    "word word word" or a table of "yes no yes" is not one.
+    """
+    tokens = [m.group().lower() for m in _WORD.finditer(run)]
+    for i in range(len(tokens) - _SEED_RUN_MIN + 1):
+        if len(set(tokens[i:i + _SEED_RUN_MIN])) >= _SEED_RUN_MIN - 1:
+            return True
+    return False
+
+
 def seed_run_spans(text: str) -> list[tuple[int, int]]:
-    """(start, end) of each unlabelled seed phrase: the outbound filter's view."""
-    return [(f.start, f.end) for f in _seed_runs(text)]
+    """(start, end) of each unlabelled seed phrase: the outbound filter's view.
+
+    Stricter than intake (which burns on any run): what goes out is the bot's
+    own prose, so a run of the same few words is let through.
+    """
+    return [(f.start, f.end) for f in _seed_runs(text) if _has_varied_window(f.value)]
 
 
 def _labelled_seeds(text: str) -> list[Finding]:

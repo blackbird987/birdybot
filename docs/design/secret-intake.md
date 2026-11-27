@@ -151,7 +151,10 @@ exit point. Harness: `scripts/test_redact_outbound.py`.
   count), an EVM address (`0x` + 40 hex) and a name `is_public_name` calls public
   (`tokenAddress`, `token_id`); a name with private, pk, secret or password always
   hides.
-- **Seed phrases without a label.** 12 to 24 consecutive BIP39 words are hidden.
+- **Seed phrases without a label.** 12 or more consecutive BIP39 words are hidden
+  when some 12 of them in a row repeat at most one word (`secret_detect.seed_run_spans`).
+  A generated phrase almost never repeats; filler like "word word word" does. Intake
+  stays stricter and burns any run.
 - **Markers say what was hidden.** `[hidden:private-key]`, `[hidden:password]`,
   `[hidden:api-key]`, `[hidden:url-credential]`, `[hidden:seed-phrase]`,
   `[hidden:token]`. In an owner's own final reply a known key is named

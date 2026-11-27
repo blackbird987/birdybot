@@ -160,6 +160,7 @@ EXPECTED_KEYS = frozenset({
     "sandboxed_repos",
     "choice_offers",
     "recaps",
+    "hidden_notes",
 })
 
 # Instance attributes that are deliberately not persisted (see the Instance
@@ -171,6 +172,7 @@ EPHEMERAL_INSTANCE_FIELDS = frozenset({
     "_context_bloat_note",
     "_memory_kill_note",
     "_context_overflow_note",
+    "_hidden_note",
 })
 
 tmpdir = tempfile.TemporaryDirectory()
@@ -470,6 +472,8 @@ def fixture_state() -> dict:
             "msg_id": "msg-902", "posted_at": 1760000000.5, "repo": "alpha",
             "headline": "Login fixed", "open_items": ["Log in on a phone"],
             "held": False, "instance_id": "t-77"}},
+        "hidden_notes": {"chan-note": {
+            "hits": ["password", "api-key"], "at": 1760000000.75}},
         "login_expiry_warnings": {
             f"{R}/accounts/main": "2026-11-12T14:10:01+00:00"},
         "schedules": [sched_full.to_dict(), sched_wake.to_dict()],
@@ -591,6 +595,8 @@ def _check_fixture_getters(store: StateStore) -> None:
     _eq("sandboxed repos", store.sandbox_entries(), fx["sandboxed_repos"])
     _eq("choice offers", store.list_choice_offers(), fx["choice_offers"])
     _eq("end card records", store.list_recaps(), fx["recaps"])
+    _eq("hidden notes", store.get_hidden_note("chan-note"),
+        fx["hidden_notes"]["chan-note"])
     _eq("login expiry warnings", store.get_login_expiry_warnings(),
         fx["login_expiry_warnings"])
     _eq("sidelined accounts", store.sidelined_accounts(),
@@ -738,6 +744,7 @@ def _populate_through_api(store: StateStore) -> None:
                                            "labels": ["A", "B"], "offered_at": 1.0})
     store.put_recap("chan-card", {"msg_id": "m-2", "posted_at": time.time(),
                                   "open_items": ["A"], "held": False})
+    store.put_hidden_note("chan-note", {"hits": ["password"], "at": time.time()})
     store.set_account_alert(work, "logged_out", "2026-10-10T00:00:00+00:00",
                             "fp-work-2")
     store.snooze_account_alert(work, "2026-10-17T00:00:00+00:00")

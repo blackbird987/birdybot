@@ -5,7 +5,7 @@
 ### Security
 - **Everything the bot posts to Discord now passes the secret filter at one exit point**, including the thinking card, every embed and card, and uploads: the Log and Diff buttons and `/log` used to upload the raw file. Text uploads go up redacted while the file on disk stays as it was, and a text file past 25 MB is cut rather than sent unfiltered; binary files pass untouched. The prompt review card, the log triage verdict, deploy updates, the archive entry and the session transcript fallback redact too.
 - **Real keys are known by value.** The filter reads the key files on this machine (`.env` style files in each registered repo's main checkout and in `~/.config/*/`) and hides any value whose name says it is a key, `ARC_BURNER_PK` included, in replies and in logs. Names that say the value is public (ending in ADDRESS, ID, IDS, POOL, HOST, or with a PUBLIC segment) are not loaded, nor are URLs other than webhook URLs.
-- **A seed phrase without a label is now hidden** (12 to 24 BIP39 words in a row).
+- **A seed phrase without a label is now hidden** (12 or more BIP39 words in a row, with at most one repeat in some 12 of them, so filler like "word word word" shows).
 
 ### Changed
 - **Public ids are no longer hidden.** A tx hash or pool id in an explorer link (Dexscreener, Etherscan, Blockscout, Hyperliquid and others) or after a label like `tx`, `hash` or `pool id` shows. `HasToken=False`, token counts like `tokens: 0`, and an address or id under a token name (`tokenAddress: 0x...`, `token_id`) show. Rescanning 522 saved replies, the old filter hid 34 values in 17 of them and the new one hides 12 in 7: passwords, one token, and fake keys quoted as examples.
