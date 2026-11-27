@@ -14,9 +14,10 @@ Rules (docs/design/secret-intake.md, "Outbound filter"):
   skipped: they hold placeholders, not keys.
 - A value counts when its name has a key-like segment (``PK``, ``KEY``,
   ``PRIVATE``, ``SECRET``, ``PASSWORD``, ``MNEMONIC``, ``SEED``, ``TOKEN`` and
-  the door's other secret segments) and does not end in a location or id
-  segment (``ADDRESS``, ``ID``, ``POOL``, ``URL`` ...). A webhook URL is still
-  a key: the URL rule gives way to a ``WEBHOOK`` segment.
+  the door's other secret segments) and does not name a public thing: a last
+  segment such as ``ADDRESS``, ``ID``, ``IDS``, ``POOL``, ``HOST`` or ``PATH``
+  (``is_public_name``), or a ``PUBLIC``/``PUBKEY`` segment. A name ending in
+  ``URL`` is not a key either, except a ``WEBHOOK`` URL, which is one.
 - At least 8 characters, and not a placeholder.
 
 Nothing here raises, logs a value, or reads on every call: the file set is
@@ -46,7 +47,13 @@ CONFIG_DIR: Path = Path.home() / ".config"
 _KEY_SEGMENTS = frozenset({"PK", "PRIVATE", "PRIVKEY", "MNEMONIC", "SEED"}) | (
     secret_detect._SECRET_NAME_SEGMENTS - {"AUTH"}
 )
-_PUBLIC_SUFFIXES = frozenset({"ADDRESS", "ADDR", "ID", "POOL", "URL", "HOST", "PORT", "PATH", "DIR"})
+# A last segment that names a public thing, not a credential. Shared with the
+# outbound filter's name=value rule (bot/platform/redact.py), so the two agree.
+_PUBLIC_SUFFIXES = frozenset({
+    "ADDRESS", "ADDRESSES", "ADDR", "ID", "IDS", "POOL", "HOST", "PORT", "PATH", "DIR",
+})
+_PUBLIC_SEGMENTS = frozenset({"PUBLIC", "PUBKEY"})
+_CAMEL = re.compile(r'([a-z0-9])([A-Z])')
 _TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist", ".tmpl")
 _LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 
@@ -72,15 +79,30 @@ def set_repo_roots(repos: dict) -> None:
             _checked_at = 0.0
 
 
+def segments(name: str) -> list[str]:
+    """``tokenAddress``, ``TOKEN_ADDRESS`` and ``token-address`` all give
+    ``["TOKEN", "ADDRESS"]``."""
+    return [p for p in re.split(r"[_\-.\s]+", _CAMEL.sub(r"\1_\2", name).upper()) if p]
+
+
+def is_public_name(name: str) -> bool:
+    """Does this name say its value is public (an address, an id, a host)?"""
+    parts = segments(name)
+    if not parts:
+        return False
+    return parts[-1] in _PUBLIC_SUFFIXES or bool(set(parts) & _PUBLIC_SEGMENTS)
+
+
 def name_is_key(name: str) -> bool:
     """Does this variable name say its value unlocks something?"""
-    segments = [s for s in name.upper().split("_") if s]
-    if not segments:
+    parts = segments(name)
+    if not parts:
         return False
-    keyish = bool(set(segments) & _KEY_SEGMENTS) or "APIKEY" in name.upper() or "PASSWORD" in name.upper()
-    if not keyish:
+    upper = name.upper()
+    keyish = bool(set(parts) & _KEY_SEGMENTS) or "APIKEY" in upper or "PASSWORD" in upper
+    if not keyish or is_public_name(name):
         return False
-    if segments[-1] in _PUBLIC_SUFFIXES and "WEBHOOK" not in segments:
+    if parts[-1] == "URL" and "WEBHOOK" not in parts:
         return False
     return True
 
@@ -158,6 +180,7 @@ def entries() -> tuple[tuple[str, str], ...]:
     with _lock:
         if now - _checked_at < RECHECK_SECONDS:
             return _result
+        failed = False
         try:
             files, dir_sig = _candidate_files()
             file_sig: list[tuple[str, int, int]] = []
@@ -172,9 +195,14 @@ def entries() -> tuple[tuple[str, str], ...]:
                 _result = _rebuild(files)
                 _signature = signature
         except Exception:  # pragma: no cover - defensive
-            log.debug("Key-file scan failed, keeping the last good list", exc_info=True)
+            failed = True
         _checked_at = now
-        return _result
+        result = _result
+    # Logged outside the lock: the log formatter calls back into entries(), and
+    # a non-reentrant lock held here would wait on itself.
+    if failed:  # pragma: no cover - defensive
+        log.debug("Key-file scan failed, keeping the last good list", exc_info=True)
+    return result
 
 
 def _rebuild(files: list[tuple[str, Path]]) -> tuple[tuple[str, str], ...]:

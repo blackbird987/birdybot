@@ -470,14 +470,25 @@ def _owner_detail(ctx: RequestContext, inst: Instance) -> bool:
         return False
 
 
+# Side turns of the session that read the secret filter's note without using
+# it up: the end card's recap and a TL;DR. The user's next real turn still
+# gets it.
+_HIDDEN_NOTE_PEEK_ORIGINS = frozenset({InstanceOrigin.RECAP, InstanceOrigin.TLDR})
+_HIDDEN_NOTE_MAX_HITS = 100
+
+
 def _remember_hidden(ctx: RequestContext, inst: Instance, hidden: list[str]) -> None:
-    """Keep a note for the session's next turn in this thread. Kinds only."""
+    """Keep a note for the session's next turn in this thread. Kinds only.
+
+    Added to a note still pending: the session has been told about neither reply.
+    """
     if inst.origin in _NOT_A_TURN_ORIGINS or not ctx.channel_id:
         return
     try:
+        pending = ctx.store.get_hidden_note(ctx.channel_id) or {}
+        hits = [str(h) for h in (pending.get("hits") or [])] + list(hidden)
         ctx.store.put_hidden_note(ctx.channel_id, {
-            "count": len(hidden),
-            "kinds": summarize_hits(hidden),
+            "hits": hits[-_HIDDEN_NOTE_MAX_HITS:],
             "at": datetime.now(timezone.utc).isoformat(),
         })
     except Exception:
@@ -487,14 +498,21 @@ def _remember_hidden(ctx: RequestContext, inst: Instance, hidden: list[str]) -> 
 def _take_hidden_note(ctx: RequestContext, inst: Instance) -> None:
     """Hand the thread's pending note to this turn, if it resumes the session.
 
-    Popped either way: a fresh session never wrote the reply it describes.
+    Used up either way, except by a side turn: a fresh session never wrote the
+    reply it describes.
     """
+    if not ctx.channel_id:
+        return
     try:
-        note = ctx.store.pop_hidden_note(ctx.channel_id) if ctx.channel_id else None
+        if inst.origin in _HIDDEN_NOTE_PEEK_ORIGINS:
+            note = ctx.store.get_hidden_note(ctx.channel_id)
+        else:
+            note = ctx.store.pop_hidden_note(ctx.channel_id)
     except Exception:
         return
-    if note and inst.session_id:
-        inst._hidden_note = session_notice(int(note.get("count") or 0), str(note.get("kinds") or ""))
+    hits = [str(h) for h in (note or {}).get("hits") or []]
+    if hits and inst.session_id:
+        inst._hidden_note = session_notice(len(hits), summarize_hits(hits))
 
 
 async def run_instance(

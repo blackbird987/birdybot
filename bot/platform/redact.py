@@ -106,6 +106,8 @@ _KV_NON_VALUES = frozenset({"true", "false", "none", "null", "nil"})
 # name holding a plain number is a measurement, never a credential.
 _KV_TOKEN_COUNT_NAME = re.compile(r'(?i)tokens$')
 _KV_COUNT_VALUE = re.compile(r'[\d,._]+[kKmM]?')
+# An EVM address is public by shape (a private key is 64 hex, not 40).
+_KV_EVM_ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}')
 # A name that always hides its value, flag-shaped or not.
 _KV_ALWAYS = re.compile(r'(?i)private|secret|password|(?:^|_)pk(?:_|$)')
 
@@ -290,14 +292,6 @@ def _literals() -> _Literals:
     return lits
 
 
-def _env_secret_values() -> tuple[str, ...]:
-    """Every literal value, longest first. Kept for callers that read the list."""
-    lits = _literals()
-    values = [v for _, v in lits.plain] + list(lits.hex_names)
-    values.sort(key=len, reverse=True)
-    return tuple(values)
-
-
 def _strip_literals(text: str, label, hits: list[str] | None) -> str:
     """Replace every known value. ``label(name)`` gives (marker, reported kind)."""
     lits = _literals()
@@ -330,7 +324,7 @@ def scrub_known(text: str) -> str:
     if not text:
         return text
     text = _strip_literals(text, lambda _n: (LOG_MARKER, ""), None)
-    for pattern in secret_detect.REDACT_PATTERNS:
+    for pattern in _VENDOR_PATTERNS:
         text = pattern.sub(LOG_MARKER, text)
     return text
 
@@ -368,8 +362,13 @@ def _kv_kind(m: re.Match) -> str | None:
     bare = value.strip('`"\'()[]{}.,;:')
     if not always and bare.lower() in _KV_NON_VALUES:
         return None
-    if not always and _KV_TOKEN_COUNT_NAME.search(name) and _KV_COUNT_VALUE.fullmatch(bare):
-        return None
+    if not always:
+        if _KV_TOKEN_COUNT_NAME.search(name) and _KV_COUNT_VALUE.fullmatch(bare):
+            return None
+        # `tokenAddress: 0x...`, `token_id=42`: the name says it is public, the
+        # same rule the key files use (bot/keyfiles.py).
+        if keyfiles.is_public_name(name) or _KV_EVM_ADDRESS.fullmatch(bare):
+            return None
     low = name.lower()
     if "pass" in low:
         return KIND_PASSWORD
@@ -391,6 +390,12 @@ def _replace_spans(text: str, spans: list[tuple[int, int]], kind: str, hits: lis
     return text
 
 
+_SHAPE_KINDS = frozenset({
+    KIND_PRIVATE_KEY, KIND_PASSWORD, KIND_API_KEY, KIND_URL_CREDENTIAL,
+    KIND_SEED_PHRASE, KIND_TOKEN, KIND_KNOWN_KEY,
+})
+
+
 _last_log: tuple[str, float] = ("", 0.0)
 _LOG_REPEAT_SECONDS = 30.0
 
@@ -408,12 +413,6 @@ def _log_hits(hits: list[str]) -> None:
         return
     _last_log = (summary, now)
     log.info("Secret filter hid %d value(s): %s", len(hits), summary)
-
-
-_SHAPE_KINDS = frozenset({
-    KIND_PRIVATE_KEY, KIND_PASSWORD, KIND_API_KEY, KIND_URL_CREDENTIAL,
-    KIND_SEED_PHRASE, KIND_TOKEN, KIND_KNOWN_KEY,
-})
 
 
 def redact_report(text: str, *, detail: bool = False) -> tuple[str, list[str]]:

@@ -27,16 +27,16 @@ log = logging.getLogger(__name__)
 #
 # Direct ``channel.send`` / ``thread.send`` calls outside this class that carry
 # session output redact on their own: prompt_review.py (the reviewer's report),
-# forums.py (the transcript fallback), log_triage.py (the verdict) and
-# deploy_flow.py (deploy output). Left out on purpose, because they carry no
-# session output: alerts.py and monitoring.py (bot-built status lines),
-# wizard.py and slash_commands.py (setup prompts and command replies the bot
-# writes), interactions.py followups (button acknowledgements), dashboard.py
-# (counts and names), the archive copy in forums.py (re-posts messages that
-# already went through this class) and peer_link.py (its own confinement and
-# redaction, bot/peer_export.py).
+# forums.py (the archive entry and the session transcript fallback),
+# log_triage.py (the verdict) and deploy_flow.py (deploy output). Left out on
+# purpose: alerts.py and monitoring.py (bot-built status lines), wizard.py and
+# slash_commands.py (setup prompts and command replies the bot writes),
+# interactions.py followups (button acknowledgements), dashboard.py (counts and
+# names), forums.py's one-time archive channel migration (re-posts messages the
+# bot already posted), memes.py (a video file, binary) and peer_link.py (its own
+# confinement and redaction, bot/peer_export.py).
 
-# Uploaded as filtered text. Anything else is sniffed: a small file that
+# Uploaded as filtered text. Anything else is sniffed: a file whose start
 # decodes as UTF-8 is text too, the rest (pictures, archives) goes as is.
 _TEXT_SUFFIXES = frozenset({
     ".md", ".txt", ".log", ".diff", ".patch", ".json", ".html", ".csv",
@@ -46,8 +46,10 @@ _BINARY_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".webm",
     ".mp3", ".wav", ".ogg", ".zip", ".gz", ".tar", ".7z", ".pdf", ".ico",
 })
+# Past this a text file is cut, never sent unfiltered. Discord refuses larger
+# uploads anyway.
 _TEXT_UPLOAD_MAX = 25 * 1024 * 1024
-_SNIFF_MAX = 2 * 1024 * 1024
+_SNIFF_BYTES = 64 * 1024
 
 
 def _redacted(text):
@@ -61,29 +63,38 @@ def _safe(text: str, limit: int = 4096) -> str:
     return apply_discord_safety(redact_secrets(text or ""), limit=limit)
 
 
+def _looks_text(sample: bytes) -> bool:
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError as e:
+        # A multi-byte character cut by the sample's end is still text.
+        return e.start >= len(sample) - 3 and len(sample) == _SNIFF_BYTES
+    return True
+
+
 def _upload(file_path: str, filename: str) -> discord.File:
     """A Discord attachment, text filtered in memory. The file on disk is
     never modified: it is the bot's own record of what the session wrote."""
     path = Path(file_path)
     suffix = path.suffix.lower()
+    if suffix in _BINARY_SUFFIXES:
+        return discord.File(file_path, filename=filename)
     try:
-        if suffix not in _BINARY_SUFFIXES:
-            size = path.stat().st_size
-            if suffix in _TEXT_SUFFIXES and size <= _TEXT_UPLOAD_MAX:
-                raw = path.read_bytes()
-                text = raw.decode("utf-8", errors="surrogateescape")
-            elif size <= _SNIFF_MAX:
-                raw = path.read_bytes()
-                text = raw.decode("utf-8")  # strict: a binary file stays binary
-            else:
-                text = None
-            if text is not None:
-                cleaned = redact_secrets(text)
-                data = cleaned.encode("utf-8", errors="surrogateescape")
-                return discord.File(io.BytesIO(data), filename=filename)
-    except (OSError, UnicodeDecodeError):
-        pass
-    return discord.File(file_path, filename=filename)
+        with path.open("rb") as f:
+            raw = f.read(_TEXT_UPLOAD_MAX + 1)
+    except OSError:
+        return discord.File(file_path, filename=filename)
+    if suffix not in _TEXT_SUFFIXES and not _looks_text(raw[:_SNIFF_BYTES]):
+        return discord.File(file_path, filename=filename)
+    cut = len(raw) > _TEXT_UPLOAD_MAX
+    text = raw[:_TEXT_UPLOAD_MAX].decode("utf-8", errors="surrogateescape")
+    cleaned = redact_secrets(text)
+    if cut:
+        cleaned += "\n[cut here by the bot: the file is larger than 25 MB]\n"
+    data = cleaned.encode("utf-8", errors="surrogateescape")
+    return discord.File(io.BytesIO(data), filename=filename)
 
 # Button style map: action prefix -> Discord button style
 _STYLE_MAP = {
@@ -568,7 +579,8 @@ class DiscordMessenger:
         if not channel:
             return ""
 
-        file = _upload(file_path, filename)
+        # Off the event loop: filtering a multi-megabyte log takes a while.
+        file = await asyncio.to_thread(_upload, file_path, filename)
         msg = await channel.send(content=_redacted(caption), file=file)
         return str(msg.id)
 
@@ -580,7 +592,9 @@ class DiscordMessenger:
         channel = await self._resolve_channel(channel_id)
         if not channel or not file_paths:
             return []
-        files = [_upload(p, Path(p).name) for p in file_paths[:10]]
+        files = [
+            await asyncio.to_thread(_upload, p, Path(p).name) for p in file_paths[:10]
+        ]
         msg = await channel.send(content=_redacted(caption), files=files)
         return [str(msg.id)]
 

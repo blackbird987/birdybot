@@ -198,8 +198,9 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         # key for the same reason as the offers above: it decides whether the
         # thread may close, so it must outlive a restart and an instance prune.
         self._recaps: dict[str, dict] = {}
-        # What the outbound secret filter hid from a thread's last reply, one
-        # note per channel: {channel_id: {count, kinds, at}}. The session's
+        # What the outbound secret filter hid from a thread's replies since the
+        # session was last told, one note per channel: {channel_id: {hits, at}},
+        # hits being kinds (or key names in an owner thread). The session's
         # next turn in that thread reads it once (bot/claude/runner/
         # prompt_build.py). Kinds and counts only, never a value.
         self._hidden_notes: dict[str, dict] = {}

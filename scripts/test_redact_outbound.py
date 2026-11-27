@@ -115,6 +115,10 @@ for text, label in (
     ("`HasToken=False`-style", "a flag in backticks"),
     ("input_tokens: 1,234 and max_tokens=4096", "token counts"),
     (f"router {ADDR40}", "a 40-hex address"),
+    (f'"tokenAddress": "{ADDR40}"', "a camelCase token address in JSON"),
+    (f"token_address={ADDR40}", "a snake_case token address"),
+    (f"token_contract: {ADDR40}", "an address under any token name"),
+    ("token_id: 4815162342", "a token id"),
 ):
     out = redact_secrets(text)
     check(out == text, label, out)
@@ -152,6 +156,13 @@ check(not any(o.startswith("SOME_TOKEN") for o in origins), "a placeholder is no
 check(not any(o.startswith(("EXAMPLE_SECRET", "WT_SECRET", "COMMENTED")) for o in origins),
       "templates, worktrees and comments are not read")
 check(keyfiles.name_is_key("DISCORD_WEBHOOK_URL"), "a webhook URL name is a key")
+for name in ("TEST_WEBHOOK_USER_ID", "TEST_WEBHOOK_IDS", "VAPID_PUBLIC_KEY", "WALLET_PUBKEY",
+             "TOKEN_URL", "SIGNER_KEY_ADDRESSES", "apiKeyHost"):
+    check(not keyfiles.name_is_key(name), f"{name} is not a key")
+for name in ("ARC_BURNER_PK", "X_ACCESS_SECRET", "PLEX_TOKEN", "DELUGE_PASS", "apiKey"):
+    check(keyfiles.name_is_key(name), f"{name} is a key")
+out = redact_secrets(f"private_key_address={ADDR40}")
+check(ADDR40 not in out, "a private-key name hides even an address-shaped value", out)
 
 out = redact_secrets(f"https://dexscreener.com/elysium/0x{HEX_B}")
 check(HEX_B not in out.lower(), "a real key in an explorer link is still hidden", out)
@@ -313,6 +324,28 @@ async def adapter_checks() -> None:
     await m.send_file("c", str(odd), "notes.weird")
     check(HEX.encode() not in ch.sent[-1].kw["_bytes"][0], "an unknown suffix that is UTF-8 is sniffed as text")
 
+    blobby = _TMP / "dump.bin"
+    blobby.write_bytes(bytes(range(256)) * 4 + b" k " + HEX.encode())
+    await m.send_file("c", str(blobby), "dump.bin")
+    check(ch.sent[-1].kw["_bytes"][0] == blobby.read_bytes(), "an unknown binary file passes untouched")
+
+    import bot.discord.adapter as adapter_mod
+    big = _TMP / "big.out"
+    big.write_text(("x" * 99 + "\n") * 1000 + "k " + HEX + "\n", encoding="utf-8")
+    old_max = adapter_mod._TEXT_UPLOAD_MAX
+    adapter_mod._TEXT_UPLOAD_MAX = 200_000
+    try:
+        await m.send_file("c", str(big), "big.out")
+        up = ch.sent[-1].kw["_bytes"][0]
+        check(HEX.encode() not in up, "unknown-suffix text past the sniff sample is filtered")
+        adapter_mod._TEXT_UPLOAD_MAX = 50_000
+        await m.send_file("c", str(big), "big.out")
+        up = ch.sent[-1].kw["_bytes"][0]
+        check(b"cut here by the bot" in up and len(up) < 60_000,
+              "an oversized text file is cut, never sent unfiltered")
+    finally:
+        adapter_mod._TEXT_UPLOAD_MAX = old_max
+
 
 asyncio.run(adapter_checks())
 
@@ -345,18 +378,26 @@ check(not lifecycle._owner_detail(owner_ctx, inst(vault_eligible=True, origin=In
 
 _t, hits = redact_report(f"0x{HEX} and {API_VAL}")
 lifecycle._remember_hidden(owner_ctx, inst(), hits)
-check(store.get_hidden_note("chan-1")["count"] == 2, "the note is stored per thread")
+check(len(store.get_hidden_note("chan-1")["hits"]) == 2, "the note is stored per thread")
 store2 = StateStore(sdir / "state.json", sdir / "results")
 check(store2.get_hidden_note("chan-1") is not None, "the note survives a restart")
 lifecycle._remember_hidden(SimpleNamespace(store=store, channel_id="chan-2"),
                            inst(origin=InstanceOrigin.JUDGE), hits)
 check(store.get_hidden_note("chan-2") is None, "a judge's output leaves no note")
 
+i_card = inst(session_id="sess-1", origin=InstanceOrigin.RECAP)
+lifecycle._take_hidden_note(owner_ctx, i_card)
+check(bool(i_card._hidden_note) and store.get_hidden_note("chan-1") is not None,
+      "the end card's recap turn reads the note and leaves it for the next real turn")
+_t, hits1 = redact_report("password: hunter22x")
+lifecycle._remember_hidden(owner_ctx, inst(), hits1)
+check(len(store.get_hidden_note("chan-1")["hits"]) == 3, "a second reply adds to a pending note")
 i_next = inst(session_id="sess-1")
 lifecycle._take_hidden_note(owner_ctx, i_next)
 check(store.get_hidden_note("chan-1") is None, "taking the note clears it")
 note = i_next._hidden_note or ""
-check(note.startswith("SYSTEM NOTICE: 2 value(s)") and "private-key" in note and API_VAL not in note,
+check(note.startswith("SYSTEM NOTICE: 3 value(s)") and "private-key" in note
+      and "password" in note and API_VAL not in note,
       "the notice counts kinds and holds no value", note)
 
 runner = ClaudeRunner()
@@ -383,7 +424,13 @@ check(p1.startswith("SYSTEM NOTICE:") and p1.index("SYSTEM NOTICE") < p1.index("
 p2 = build(i_next)
 check("SYSTEM NOTICE" not in p2, "and only once")
 
-store.put_hidden_note("chan-1", {"count": 1, "kinds": "token"})
+p_fresh = inst(session_id="sess-1")
+p_fresh._hidden_note = "SYSTEM NOTICE: stale"
+p_fresh.session_id = None
+check("SYSTEM NOTICE" not in build(p_fresh) and not p_fresh._hidden_note,
+      "a turn whose session was cleared before the build gets no notice")
+
+store.put_hidden_note("chan-1", {"hits": ["token"]})
 i_fresh = inst(session_id=None)
 lifecycle._take_hidden_note(owner_ctx, i_fresh)
 check(not i_fresh._hidden_note and store.get_hidden_note("chan-1") is None,

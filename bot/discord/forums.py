@@ -1543,7 +1543,7 @@ class ForumManager:
             if i.session_id == info.session_id and i.summary
         ]
         summary, inst, finalize_info = pick_archive_summary(candidates, info.topic)
-        msg = format_archive_entry(channel_id, summary, inst, finalize_info)
+        msg = redact_secrets(format_archive_entry(channel_id, summary, inst, finalize_info))
 
         archive_thread = await self.ensure_archive_thread(proj.repo_name)
 

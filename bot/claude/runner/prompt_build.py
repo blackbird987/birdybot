@@ -199,11 +199,14 @@ class PromptMixin:
 
         # The secret filter's notice (bot/platform/redact.py): what it hid
         # from this session's previous reply. Once, then cleared, so a retry
-        # or a later turn of the same instance does not repeat it.
+        # or a later turn of the same instance does not repeat it. Only on a
+        # resume: a recovery that cleared session_id starts a session that
+        # never wrote the reply the note describes.
         hidden_note = getattr(instance, "_hidden_note", None)
         if hidden_note:
             instance._hidden_note = None
-            prompt = hidden_note + "\n\n" + prompt
+            if instance.session_id:
+                prompt = hidden_note + "\n\n" + prompt
 
         if instance.session_id and instance.origin not in PEER_ORIGINS:
             master_block = self._build_master_context_block(instance)

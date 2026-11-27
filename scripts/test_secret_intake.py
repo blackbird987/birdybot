@@ -82,7 +82,7 @@ def check(cond: bool, label: str) -> None:
 def reset_vault() -> None:
     shutil.rmtree(config.VAULT_DIR, ignore_errors=True)
     vault._literal_cache = None
-    redact._env_secrets_cache = None
+    redact._literal_cache = None
     secret_door._holds.clear()
     secret_door._held_message_ids.clear()
     secret_door._not_secret.clear()
