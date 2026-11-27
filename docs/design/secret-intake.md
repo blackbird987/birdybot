@@ -117,6 +117,60 @@ guest cannot store anything and gets no hold.
   so a traceback is covered. It uses `scrub_known`, not `redact_secrets`, which would
   eat ordinary words.
 
+## Outbound filter
+
+What the bot posts goes through `bot/platform/redact.py` once more, at the Discord
+exit point. Harness: `scripts/test_redact_outbound.py`.
+
+- **One exit point.** Every `DiscordMessenger` send and edit redacts: text, cards,
+  embeds (title, description, fields, footer), the thinking card and uploads. A text
+  upload (`.md .txt .log .diff .patch .json .html .csv`, or a file that decodes as
+  UTF-8) goes up redacted from memory under the same name; the file on disk is never
+  changed, a text file past 25 MB is cut and never sent unfiltered, and binary
+  files pass untouched. The few direct sends that skip the
+  adapter are listed, with the reason for each, in the comment at the top of
+  `bot/discord/adapter.py`. The older per-call-site `redact_secrets` calls stay; the
+  filter is idempotent.
+- **Literals first.** Known values are removed before any shape rule runs: the vault,
+  the bot's own config keys, and `bot/keyfiles.py`, which reads `.env`, `.env.*` and
+  `*.env` at each registered repo's main checkout root (never a worktree) plus
+  `~/.config/*/*.env`. A value counts when its name has a key segment (`PK`, `KEY`,
+  `PRIVATE`, `SECRET`, `PASSWORD`, `MNEMONIC`, `SEED`, `TOKEN` ...) and does not
+  name a public thing (`keyfiles.is_public_name`: a last segment `ADDRESS`, `ADDR`,
+  `ID`, `IDS`, `POOL`, `HOST`, `PORT`, `PATH` or `DIR`, or a `PUBLIC`/`PUBKEY`
+  segment). A name ending in `URL` counts only as a `WEBHOOK` URL. camelCase names
+  split like snake_case. At least 8 characters; hex matches in any case, with
+  or without `0x`. Cached on file and directory mtimes; an unreadable file keeps its
+  last good values.
+- **Public ids show.** A 64-hex inside an http(s) URL path on `EXPLORER_HOSTS`
+  (Dexscreener, Etherscan, Blockscout, Hyperliquid's explorer ...) is left alone, and
+  so is one labelled `tx`, `hash`, `pool`, `pool id`, `block`, `topic` and the like,
+  unless the label also says private, key, pk, secret or seed. A query string, any
+  other host and an unlabelled 64-hex stay hidden. `name=value` skips
+  `true/false/none/null/nil`, a number under a name ending in `tokens` (a token
+  count), an EVM address (`0x` + 40 hex) and a name `is_public_name` calls public
+  (`tokenAddress`, `token_id`); a name with private, pk, secret or password always
+  hides.
+- **Seed phrases without a label.** 12 or more consecutive BIP39 words are hidden
+  when some 12 of them in a row repeat at most one word (`secret_detect.seed_run_spans`).
+  A generated phrase almost never repeats; filler like "word word word" does. Intake
+  stays stricter and burns any run.
+- **Markers say what was hidden.** `[hidden:private-key]`, `[hidden:password]`,
+  `[hidden:api-key]`, `[hidden:url-credential]`, `[hidden:seed-phrase]`,
+  `[hidden:token]`. In an owner's own final reply a known key is named
+  (`[hidden:NAME@repo/file]`); everywhere else (the adapter, guests, sandboxed
+  sessions, the other machine) it is a plain `[hidden]`. Every shape pass skips a
+  value that already is a marker, so a second pass changes nothing. Logs keep
+  `[REDACTED]`.
+- **The session is told.** When a final reply had something hidden, the thread
+  gets a note in `state.json` (`hidden_notes`: the kinds hidden, never a value),
+  added to any note still pending. The next turn that resumes the same session gets
+  it prepended as a SYSTEM NOTICE and it is cleared; a fresh session drops it (and
+  so does a turn whose session a recovery cleared before the prompt was built).
+  The end card's recap and a TL;DR read it without using it up. Judge, plan check
+  and peer answers neither leave nor take one. No extra turn is ever started for
+  it. The log gets kinds and counts only.
+
 ## Where this differs from the brief
 
 - Entropy is skipped in attachment bodies and filenames, since uploads are full of

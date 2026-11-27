@@ -18,6 +18,7 @@ import discord
 from bot import config as bot_config
 from bot.claude import sandbox
 from bot.claude.runner import missing_predecessor_release
+from bot.platform.redact import redact_secrets
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -48,6 +49,8 @@ class DeployStatus:
 
     async def update(self, content: str) -> None:
         """Edit the status message. Cached object first, fetch fallback."""
+        # Deploy output is a command's stdout: it can print an env or a key.
+        content = redact_secrets(content)
         # Truncate to safe limit (leave room for formatting overhead)
         if len(content) > 1900:
             lines = content[:1850].rsplit("\n", 1)[0]

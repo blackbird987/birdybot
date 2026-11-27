@@ -332,6 +332,10 @@ class Instance:
     # is told why its predecessor was killed and that its edits are still on
     # disk. Not persisted — it describes one attempt, not the instance.
     _context_thrash_retry: bool = False
+    # Ephemeral: the secret filter's notice for this turn (what it hid from the
+    # previous reply in this thread). Set by lifecycle.run_instance from the
+    # store, prepended once and cleared by _build_command. Not persisted.
+    _hidden_note: str | None = None
     # Ephemeral companion to the above: the note naming an oversized
     # auto-attached instruction file (bot/claude/context_bloat.py), set and
     # cleared on exactly the same schedule. Empty when the transcript named

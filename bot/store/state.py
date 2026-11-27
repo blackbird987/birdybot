@@ -27,7 +27,7 @@ from bot.store.accounts import AccountsMixin
 from bot.store.chains import ChainsMixin
 from bot.store.peer import PeerMixin
 from bot.store.records import AutoFixState, DeployState
-from bot.store.repos import ReposMixin
+from bot.store.repos import ReposMixin, _publish_repo_roots
 from bot.store.schedules import SchedulesMixin
 
 log = logging.getLogger(__name__)
@@ -198,6 +198,12 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         # key for the same reason as the offers above: it decides whether the
         # thread may close, so it must outlive a restart and an instance prune.
         self._recaps: dict[str, dict] = {}
+        # What the outbound secret filter hid from a thread's replies since the
+        # session was last told, one note per channel: {channel_id: {hits, at}},
+        # hits being kinds (or key names in an owner thread). The session's
+        # next turn in that thread reads it once (bot/claude/runner/
+        # prompt_build.py). Kinds and counts only, never a value.
+        self._hidden_notes: dict[str, dict] = {}
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -271,6 +277,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
             inst = Instance.from_dict(d)
             self._instances[inst.id] = inst
         self._repos = data.get("repos", {})
+        _publish_repo_roots(self._repos)
         self._repo_descriptions = data.get("repo_descriptions", {})
         self._dormant_repos = set(data.get("dormant_repos", []) or [])
         # A value that is not a dict is kept as a marker, not read as "nothing
@@ -323,6 +330,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._peer_daily = data.get("peer_daily", {})
         self._choice_offers = data.get("choice_offers", {}) or {}
         self._recaps = data.get("recaps", {}) or {}
+        self._hidden_notes = data.get("hidden_notes", {}) or {}
         self._deploy_state = {
             k: DeployState.from_dict(v)
             for k, v in data.get("deploy_state", {}).items()
@@ -420,6 +428,21 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
     def list_choice_offers(self) -> dict[str, dict]:
         return dict(self._choice_offers)
 
+    # --- secret-filter notes (bot/platform/redact.py decides what was hidden) ---
+
+    def put_hidden_note(self, channel_id: str, note: dict) -> None:
+        self._hidden_notes[str(channel_id)] = note
+        self.save()
+
+    def get_hidden_note(self, channel_id: str) -> dict | None:
+        return self._hidden_notes.get(str(channel_id))
+
+    def pop_hidden_note(self, channel_id: str) -> dict | None:
+        note = self._hidden_notes.pop(str(channel_id), None)
+        if note is not None:
+            self.save()
+        return note
+
     # --- end card records (bot/engine/recap.py owns the rules) ---
 
     def get_recap(self, channel_id: str) -> dict | None:
@@ -491,6 +514,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
             "peer_daily": self._peer_daily,
             "choice_offers": self._choice_offers,
             "recaps": self._recaps,
+            "hidden_notes": self._hidden_notes,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
