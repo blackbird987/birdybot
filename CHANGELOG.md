@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.40, Secret filter hides only real secrets (2026-11-27)
+
 ### Security
 - **Everything the bot posts to Discord now passes the secret filter at one exit point**, including the thinking card, every embed and card, and uploads: the Log and Diff buttons and `/log` used to upload the raw file. Text uploads go up redacted while the file on disk stays as it was, and a text file past 25 MB is cut rather than sent unfiltered; binary files pass untouched. The prompt review card, the log triage verdict, deploy updates, the archive entry and the session transcript fallback redact too.
 - **Real keys are known by value.** The filter reads the key files on this machine (`.env` style files in each registered repo's main checkout and in `~/.config/*/`) and hides any value whose name says it is a key, `ARC_BURNER_PK` included, in replies and in logs. Names that say the value is public (ending in ADDRESS, ID, IDS, POOL, HOST, or with a PUBLIC segment) are not loaded, nor are URLs other than webhook URLs.
